@@ -1,0 +1,2087 @@
+function MakeAVaultCert {
+    <#
+    .SYNOPSIS
+
+    Creates a Certificate from a Vault CA
+ 
+    .DESCRIPTION
+
+    Will create and import a certificate froma  Vault CA. Can be used to keep IIS certs up to date and or upload certs to AWS
+ 
+    .OUTPUTS
+
+    Nothing
+            
+    .PARAMETER SubjectName
+            
+    The subjectName for the certificate. This will generally be the websitename. This value MUST be defined under AllowedDomains in the vault.yaml file for the namespace.
+    The entries ARE Capitalization sensitive and its recommended to leave all entries lowercase. The function will send all subjectnames in lowercase to vault.
+    Example SubjectName: www.google.com
+
+    Example vault.yaml Entries:
+        Version: 1
+
+        Notifications:
+          Email: Example_DL@domain.com
+
+        Admins:
+          - ID: I123456
+            Email: Example_User@domain.com
+
+        Roles:
+          exampleRole:
+            AWS:
+              IAMRoles:
+                - Example-IAM-Role
+            AllowedDomains:
+              - demo.example.server.fqdn # Standard format for most certs - Exact match for a server cert - no subdomains
+              - demo-*.example.server.fqdn # Wildcard after an enforced prefix - acceptable but not preferred
+            
+            
+    .PARAMETER SanNames
+            
+    Subject Alternatie Names for the certificate. This is any additional alternate name for your site/service you whish to secure with the certificate.
+            
+    Example vault.yaml Entries:
+        Version: 1
+
+        Notifications:
+          Email: Example_DL@domain.com
+
+        Admins:
+          - ID: I123456
+            Email: Example_User@domain.com
+
+        Roles:
+          exampleRole:
+            AWS:
+              IAMRoles:
+                - Example-IAM-Role
+            AllowedDomains:
+              - demo.example.server.fqdn # Standard format for most certs - Exact match for a server cert - no subdomains
+              - demo-*.example.server.fqdn # Wildcard after an enforced prefix - acceptable but not preferred
+
+
+    .PARAMETER HashAlgorithm
+            
+    The HashAlgorithm you wish to use to encrypt the certificate with. Recommend leaving at the default sha256
+            
+
+    .PARAMETER KeyLength
+            
+    The length of the key for the certificate. Recommend leaving at 2048. At the time of writing this, vault support key lengths of 2048,4096, and 8192
+
+
+    .PARAMETER CertTTL
+            
+    How long you want the cert to live for. defined as h for hours and m for minutes
+    Example: a 90 day cert would be defined as 2160h (24 hours X 90 days)
+            
+
+    .PARAMETER CertExpirationThreshold
+            
+    How many days left on the cert before you replace it. Default is 7 days meaning if the cert is going to expire in the next 7 days, and the subjectName matches the set subjectName, then a new certificate will be replaced.
+
+
+    .PARAMETER InstallIISCert
+            
+    Defines if you want to update the certificate for a binding in IIS. The IIS Site MUST BE CREATED ALREADY to use this parmeter
+
+
+    .PARAMETER iisSiteName
+    If you use the InstallIISCert parameter you will need to define the site name that IIS will use.
+
+
+    .PARAMETER iisPort
+    If you use the InstallIISCert parmeter you will need to define the port that site uses. Defaults to 443
+            
+
+    .PARAMETER VaultAuthMethod
+            
+    The Authentication Method for connecting to Vault
+    Acceptable values are: awsIAM, Credentials, Token
+
+
+    .PARAMETER VaultNameSpace
+            
+    If you select awsIAM for VaultAuthMethod you will need to define the VaultNameSpace
+    The Namespace and any sub folders that contains the vault.yaml file .
+    Example: bastion/ExampleSubFolder1                                                            
+
+
+    .PARAMETER AWSRegion
+            
+    If you select awsIAM for VaultAuthMethod you will need to define the AWS Region that you want to connect to
+    Default: Uses the output of: (Invoke-RestMethod -Uri http://169.254.169.254/latest/dynamic/instance-identity/document -Method Get).region
+    If a region cannot be determined the function will stop and throw and error.
+            
+
+    .PARAMETER YamLRole
+    If you select awsIAM for VaultAuthMethod you will need to define the YamL role that is defined in the yaml.vault file for the namespace
+
+    Example Vault.YamL File:
+        Version: 1
+
+        Notifications:
+          Email: Example_DL@sap.com
+
+        Admins:
+          - ID: I123456
+            Email: Example_User@sap.com
+
+        Roles:
+          exampleRole: <----- yaml Role Name
+            AWS:
+              IAMRoles:
+                - Example-IAM-Role
+            AllowedDomains:
+              - example.domain.com
+
+
+    .PARAMETER VaultCredentials
+
+    If you select Credentials for VaultAuthMethod you will need to define the Credentials used to Authenticate to Vault
+            
+
+    .PARAMETER VaultToken
+
+    If you select Token for VaultAuthMethod you will need to define the Token used to Authenticate to Vault
+
+            
+    .PARAMETER VaultURL
+            
+    The URL for Vault. 
+            
+    Default: https://vault.domain.com
+
+
+    .PARAMETER AWSIamProfile
+
+    The IAM Profile assigned to the EC2 instnace. 
+    The function uses the outout of (Invoke-RestMethod -Uri http://169.254.169.254/latest/meta-data/iam/security-credentials)
+    To:
+    1 - Set the AWSIamProfile it it isn't defined
+    2 - Verify the AWSIamProfile if it IS defined
+
+    The Iam Profile also must be defined in the vault.yaml for that namespace
+            
+    Example vault.yaml file:
+    Version: 1
+
+    Notifications:
+        Email: Example_DL@domain.com
+
+    Admins:
+      - ID: I123456
+        Email: Example_User@domain.com
+
+    Roles:
+      exampleRole:
+        AWS:
+          IAMRoles:
+            - Example-IAM-Role <----- This should be the IAM role assigned to the EC2 instance
+        AllowedDomains:
+          - example.domain.com
+            
+
+    .PARAMETER UploadToAWS
+
+    Uploads the certificate to the AWS CertManager Store. Uses the attached IAM role to upload the certificate. 
+    Make sure that the attached IAM role has the rights to upload certificates to AWS
+
+    This also marks the certificate as exportable
+
+
+    .PARAMETER Exportable
+
+    Set if the certificate should be exportable or not. If you use the UploadToAWS paramter the certificate will be marked as exportable
+
+
+    .PARAMETER ExportToFile
+
+    Will export the cert, key and cert chain to a Pem formated file. The files will be stored in the working directory. If this parameter is set then the certificate will also automatically be marked as exportalbe.
+    Files will be stored as SubjectName_(cert/key/chain).pem
+
+
+    .PARAMETER RemoveExpiredCerts
+
+    Removes any expired certificate with the same subjectName
+
+
+    .PARAMETER WorkingFolderPath
+            
+    Path to the folder where the certificate files will be exported if ExportToFile is set
+    Default: C:\Certificates\<SubjectName (stripped of all special characters)>_<DateTimeStamp>\
+
+
+    .PARAMETER LogFolderPath
+            
+    Path to the folder where powershell outputs its logs to.
+    Default: C:\Logs\<SubjectName (stripped of all special characters)>\
+
+
+    .PARAMETER Quite
+            
+    Will stop logging from being written the console
+
+
+    .PARAMETER Force
+
+    Force a cert to be generated and installed
+
+
+    .Example
+
+    The minimum information needed to create a certificate.
+    Creates a 90 day (default) certificate for thycotic.service.cnqr.tech authenticating to vault using IAM auth.
+
+    MakeAVaultCert -SubjectName "thycotic.domain.com" -VaultAuthMethod awsIAM -YamLRole exampleRole -VaultNameSpace exampleNamespace
+
+
+    .Example
+
+    Creates a 30 day certificate for thycotic.service.cnqr.tech with SubjectAlternateNames of thycoticSS1.service.cnqr.tech and thycoticSS2.service.cnqr.tech. Authenticates to Vault using IAM Auth and install them to the Default Web Site in IIS
+
+    MakeAVaultCert -SubjectName "thycotic.domain.com" -SanNames "thycoticFE001.domain.com" -CertTTL "720h" -VaultAuthMethod awsIAM -YamLRole exampleRole -VaultNameSpace exampleNamespace -InstallIISCert -iisSiteName 'Default Web Site'
+
+
+    .Example
+
+    Creates a 30 day certificate for thycotic.service.cnqr.tech. It authenticates to https://vault.nonstandard.Url.com using the IAM Profile of EC2Admin
+
+    MakeAVaultCert -SubjectName "thycotic.domain.com" -CertTTL "720h" -VaultAuthMethod awsIAM -YamLRole exampleRole -VaultNameSpace exampleNamespace -VaultURL "https://vault.nonstandard.Url.com" -AWSIamProfile "ExampleProfile"
+
+    #>
+    [CmdletBinding(DefaultParameterSetName="Default")]
+    param(
+        #need to remove the false flage when testing
+        [parameter(Mandatory = $true)]
+        [string]
+        $SubjectName,
+
+        [parameter()]
+        $SanNames,
+
+        [parameter()]
+        [string]
+        $HashAlgorithm = "sha256",
+
+        [parameter()]
+        [ValidateSet(2048,4096,8192)]
+        [long]
+        $KeyLength = "2048",
+
+        [parameter(HelpMessage="Enter Cert TLL in Hours (h) or Minutes (m). Example: 2160h for 90 days")]
+        [string]
+        $CertTTL = "2160h",
+
+        [parameter()]
+        [int]
+        $CertExpirationThreshold = 7,
+
+        [parameter()]
+        [Switch]
+        $InstallIISCert = $false,
+
+        #need to remove the false flage when testing
+        [parameter(Mandatory = $true)]
+        [ValidateSet("awsIAM","Credentials","Token")]
+        [String]
+        $VaultAuthMethod,
+        
+        [parameter(Mandatory = $true)]
+        [String]
+        $VaultNameSpace,
+        
+        [parameter(Mandatory = $true)]
+        [String]
+        $YamLRole,
+
+        #need to remove the false flage when testing
+        [parameter()]
+        [ValidateScript({Test-NetConnection -Port 443 $_.Host -InformationLevel Quiet})]
+        [uri]
+        $VaultURL = "https://vault.domain.com",
+
+        [parameter()]
+        [String]
+        $AWSIamProfile,
+
+        [parameter()]
+        [Switch]
+        $UploadToAWS = $false,
+
+        [parameter()]
+        [Switch]
+        $Exportable = $false,
+
+        [parameter()]
+        [Switch]
+        $ExportToFile = $false,
+
+        [parameter()]
+        [Switch]
+        $RemoveExpiredCerts = $false,
+
+        [parameter()]
+        $WorkingFolderPath,
+
+        [parameter()]
+        $LogFolderPath,
+        
+        [parameter()]
+        [Switch]
+        $Quiet = $false,
+        
+        [parameter()]
+        [Switch]
+        $Force = $false
+    )
+
+    DynamicParam {
+        $paramDictionary = New-Object System.Management.Automation.RuntimeDefinedParameterDictionary
+
+        if ($InstallIISCert -eq $true) {
+            #Add IIS Site Name Parameter
+            #Name of the Parameter
+            $paramName = "iisSiteName"
+            
+            #Create Attribute and Attributecollection objects
+            $paramAttribute = New-Object System.Management.Automation.ParameterAttribute
+            $attributeCollection = New-Object System.Collections.ObjectModel.Collection[System.Attribute]
+
+            #Define and add Parameter Attributes
+            $paramAttribute.Mandatory = $true
+            $attributeCollection.Add($paramAttribute)            
+            
+            #if running in admin mode it will auto populate a list of IIS sites on the server if they exist.
+            if (([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator") -eq $true) {
+                #checks to see if the WebAdministration module is available
+                if ((Get-Module -ListAvailable -Name WebAdministration)) {
+                    #Get a list of sites to populate for the validate data
+                    $ValidateSetData = (Get-IISSite).Name
+                    $ValidateSetAttribute = New-Object System.Management.Automation.ValidateSetAttribute($ValidateSetData)
+                    #Adds the ValidateSet to the Param
+                    $attributeCollection.Add($ValidateSetAttribute)
+                }
+            }
+
+            #Create the parameter and add it to the dynamic parameters
+            $param = New-Object System.Management.Automation.RuntimeDefinedParameter($paramName, [String], $attributeCollection)
+            $paramDictionary.Add($paramName,$param)
+
+            #####################################################################################################
+
+            #Add AWSRegion Parameter
+            #Name of the Parameter
+            $paramName = "iisPort"
+            
+            #Create Attribute and Attributecollection objects
+            $paramAttribute = New-Object System.Management.Automation.ParameterAttribute
+            $attributeCollection = New-Object System.Collections.ObjectModel.Collection[System.Attribute]
+
+            #Define and add Parameter Attributes
+            $attributeCollection.Add($paramAttribute)
+            
+            #Create the parameter and add it to the dynamic parameters
+            $param = New-Object System.Management.Automation.RuntimeDefinedParameter($paramName, [int], $attributeCollection)
+            $param.Value = "443"
+            $paramDictionary.Add($paramName,$param)
+        }
+
+        if ($VaultAuthMethod -eq "awsIAM") {
+            #Add AWSRegion Parameter
+            #Name of the Parameter
+            $paramName = "AWSRegion"
+            
+            #Create Attribute and Attributecollection objects
+            $paramAttribute = New-Object System.Management.Automation.ParameterAttribute
+            $attributeCollection = New-Object System.Collections.ObjectModel.Collection[System.Attribute]
+
+            #Define and add Parameter Attributes
+            $attributeCollection.Add($paramAttribute)
+            
+            #Create the parameter and add it to the dynamic parameters
+            $param = New-Object System.Management.Automation.RuntimeDefinedParameter($paramName, [String], $attributeCollection)
+            $paramDictionary.Add($paramName,$param)
+
+            #####################################################################################################
+        }
+
+        if ($VaultAuthMethod -eq "Credentials") {
+            #Name of the Parameter
+            $paramName = "VaultCredentials"
+            
+            #Create Attribute and Attributecollection objects
+            $paramAttribute = New-Object System.Management.Automation.ParameterAttribute
+            $attributeCollection = New-Object System.Collections.ObjectModel.Collection[System.Attribute]
+
+            #Define and add Parameter Attributes
+            $paramAttribute.Mandatory = $true
+            $attributeCollection.Add($paramAttribute)
+
+            $paramValidateNotNull = New-Object System.Management.Automation.ValidateNotNullAttribute
+            $attributeCollection.Add($paramValidateNotNull)            
+            
+            #Create the parameter and add it to the dynamic parameters
+            $param = New-Object System.Management.Automation.RuntimeDefinedParameter($paramName,[System.Management.Automation.PSCredential], $attributeCollection)
+            #default Value
+            $param.Value = [System.Management.Automation.PSCredential]::Empty
+
+            $paramDictionary.Add($paramName,$param)
+
+            #####################################################################################################
+        }
+
+        if ($VaultAuthMethod -eq "Token") {
+            #Name of the Parameter
+            $paramName = "$VaultToken"
+            
+            #Create Attribute and Attributecollection objects
+            $paramAttribute = New-Object System.Management.Automation.ParameterAttribute
+            $attributeCollection = New-Object System.Collections.ObjectModel.Collection[System.Attribute]
+
+            #Define and add Parameter Attributes
+            $paramAttribute.Mandatory = $true
+            $attributeCollection.Add($paramAttribute)
+
+            #Create the parameter and add it to the dynamic parameters
+            $param = New-Object System.Management.Automation.RuntimeDefinedParameter($paramName, [String], $attributeCollection)
+
+            $paramDictionary.Add($paramName,$param)
+        }
+
+        return $paramDictionary
+    }
+
+    Begin 
+    {
+        #############################
+        #Defaults that need to be vefired before the function can even work
+        #############################
+        
+        $ErrorActionPreference = "Stop"
+
+        #Check if running in Admin Mode
+        $AdminModeCheck = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
+        if ($AdminModeCheck -eq $false) {
+            Throw "Powershell is not running in Admin mode. Please launch PowerShell with run as Admin"
+        }
+
+        #force TLS1.2
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        
+        #############################
+        #ScriptFunctions
+        #############################
+
+        #Originally taken from:
+        #https://gallery.technet.microsoft.com/scriptcenter/Write-Log-PowerShell-999c32d0
+        function Write-Log  { 
+            [CmdletBinding()]
+            Param  ( 
+                [Parameter(Mandatory, 
+                ValueFromPipelineByPropertyName=$true,
+                ValueFromPipeline = $true)]
+                [string]
+                $Message, 
+                
+                [Parameter()]
+                [string]
+                $LogName = $logFileName,
+
+                [Parameter()]
+                [string]
+                $LogFolder = $LogFolderPath,
+
+                [Parameter()]
+                [ValidateSet("Error","Warn","Info")]
+                [string]
+                $Level="Info",
+
+                [Parameter()]
+                [String]
+                $InfoTextColor,
+
+                [Parameter()]
+                [Switch]
+                $ThrowError = $false,
+
+                [Parameter()]
+                [Switch]
+                $Quiet = $Quiet.IsPresent
+            )
+
+            Begin  { 
+                # Set VerbosePreference to Continue so that verbose messages are displayed. 
+                $VerbosePreference = 'Continue' 
+                if ($InfoTextColor -and ($InfoTextColor -in [Enum]::GetValues([ConsoleColor])) ) {
+                    $foregroundColor = @{
+                        ForegroundColor = $InfoTextColor
+                    }
+                }
+
+                if (!($LogName)) {
+                    $LogName = "PowerShellLog_$(Get-date -Format FileDateTimeUniversal).txt"
+                }
+
+                if (!($LogFolder)) {
+                    $LogFolder = "C:\Logs\"
+                }
+
+                $LogPath = Join-Path -Path $LogFolder -ChildPath $LogName
+            }
+             
+            Process  {
+                # If attempting to write to a log file in a folder/path that doesn't exist create the file including the path. 
+                if (!(Test-Path $LogPath)) { 
+                    Write-Verbose "Creating: $LogPath." 
+                    New-Item $LogPath -Force -ItemType File | Out-Null
+                }
+
+                # Format Date for our Log File 
+                $FormattedDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss" 
+ 
+                # Write message to error, warning, or verbose pipeline and specify $LevelText 
+                switch ($Level) { 
+                    'Error' { 
+                        $LevelText = 'ERROR:'
+                        if ($ThrowError -eq $false) {
+                            if ($Quiet -eq $false) {
+                                Write-Host -Object $Message -ForegroundColor Red
+                            }
+                        }
+                        else {
+                            # Write log entry to $LogPath
+                            # Ensures errors get written to the log
+                            if ($ErrorActionPreference -in @("Stop","Inquire") ) {
+                                "$FormattedDate $LevelText $Message" | Out-File -FilePath $LogPath -Append
+                            }
+                                
+                            Write-Error -Message $Message
+                        }
+                    }
+                    'Warn' { 
+                        $LevelText = 'WARNING:'
+                        if ($Quiet -eq $false)
+                        {
+                            Write-Host -Object $Message -ForegroundColor Yellow
+                        }
+                    }
+                    'Info' {
+                        $LevelText = 'INFO:'
+                        if ($Quiet -eq $false)
+                        {
+                            Write-Host $Message @foregroundColor
+                        }
+                    }
+                }
+         
+                # Write log entry to $LogPath
+                "$FormattedDate $LevelText $Message" | Out-File -FilePath $LogPath -Append
+            }
+
+            End {
+            }
+        }
+
+        function Normalize-Uri {
+            param (
+                [parameter(
+                    Mandatory,
+                    Position = 0,
+                    ValueFromPipeline = $True
+                )]
+                [uri]
+                $Uri
+            )
+
+            $uriPath = ($Uri.Segments | where {$_ -ne '/'}).Trim() -join ''
+
+            $uriBuilder = [System.UriBuilder]::new($uri.Scheme,$Uri.Host,$uri.Port,$uriPath)
+
+            [uri]$NormalizedUri = $uriBuilder.Uri
+
+            Return $NormalizedUri.AbsoluteUri
+        }
+
+        function EncodeTo-Base64 {
+            param (
+                $ValueToEncode
+            )
+            
+            $byteArray = [System.Text.Encoding]::UTF8.GetBytes($ValueToEncode)
+            $out = [System.Convert]::ToBase64String($byteArray)
+
+            return $out
+        }
+
+        function Build-ASWSignedRequest {
+            param (
+                $AwsIAMRole,
+                $Algorithm = 'AWS4-HMAC-SHA256',
+                $Method = 'POST',
+                $Service,
+                $awsHost,
+                $Region,
+                $awsRequestParmeters,
+                $awsQueryString,
+                $SignedHeaders,
+                $X_Amz_Target,
+                $Content_Type
+            )
+
+            function getSHA256 {
+                param (
+                    $data
+                )
+    
+                $hash = [System.Security.Cryptography.SHA256]::Create()
+                $hashData = $hash.ComputeHash( [System.Text.Encoding]::UTF8.GetBytes($data) )
+                $output = ($hashData | foreach ToString X2).ToLower()  -join ''
+                return $output
+
+            }
+
+            # inspired by https://gallery.technet.microsoft.com/scriptcenter/Get-StringHash-aa843f71
+            function HmacSHA256 {
+                param (
+                    $data,
+                    $key,
+                    [switch]$StringOut
+                )
+    
+                $hmacsha = New-Object System.Security.Cryptography.HMACSHA256    
+                $hmacsha.key = $key    
+                $sign = $hmacsha.ComputeHash([Text.Encoding]::UTF8.GetBytes($data))
+                if ($StringOut -eq $false) {
+                    return $sign
+                }
+                else {
+                    $out = ($sign | foreach ToString X2).tolower() -join ''
+                    return $out
+                }
+            }
+
+            function getSignatureKey {
+                param (
+                    [String]
+                    $key,
+
+                    [String]
+                    $dateStamp,
+
+                    [String]
+                    $regionName,
+
+                    [String]
+                    $serviceName
+                )
+    
+                $kSecret = [Text.Encoding]::UTF8.GetBytes("AWS4$($key)")
+                $kDate = HmacSHA256 -data $dateStamp -key $kSecret    
+                $kRegion = HmacSHA256 -data $regionName -key $kDate
+                $kService = HmacSHA256 -data $serviceName -key $kRegion
+                $kSigning = HmacSHA256 -data "aws4_request" -key $kService
+
+                return $kSigning # return of signing key as byte array
+
+            }
+
+            function get-amzdatestamp {
+                $date = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
+                return $date
+            }
+
+            function get-datestamp {
+                $date = (Get-Date).ToUniversalTime().ToString('yyyyMMdd')
+                return $date
+            }
+
+            function get-amzkeys {
+                param (
+                    $role
+                )
+
+                try {
+                    $uri = "http://169.254.169.254/latest/meta-data/iam/security-credentials"
+                    $localIamRole = Invoke-RestMethod -uri $uri -Method Get
+
+                    if (!($role)) {
+                        $role = $localIamRole
+                    }
+
+                    if ($role -ne $localIamRole) {
+                        throw "The defined role: $role doesn't match the value at $uri"
+                    }
+
+                    $uri = "http://169.254.169.254/latest/meta-data/iam/security-credentials/$role" 
+                    $result = Invoke-RestMethod -uri $uri -Method Get -ContentType "application/json"
+                    $roledata = $result
+                }
+                catch {
+                    $_
+                }
+
+                return $roledata
+            }
+
+            $iamData = get-amzkeys -role $AwsIAMRole
+    
+            $accesskey = $iamdata.AccessKeyId
+            $secretkey = $iamdata.SecretAccessKey
+            $x_amz_security_token = $iamdata.Token
+
+            $dateStamp = get-datestamp
+            $x_amz_date = get-amzdatestamp
+
+            # Build AWS Host if not passed
+            if ($awsHost -eq $null) {
+                $awsHostString = New-Object System.Text.StringBuilder
+                $awsHostString.Append($Service) | Out-Null
+                
+                if ($Region -ne $null) {
+                    $awsHostString.Append(".$Region") | Out-Null
+                }
+                
+                $awsHostString.Append(".amazonaws.com") | Out-Null
+                $awsHost = $awsHostString.ToString()
+            }
+
+            # Followed https://docs.aws.amazon.com/general/latest/gr/sigv4-signed-request-examples.html#sig-v4-examples-post
+            # To create this script
+
+            # ************* TASK 1: CREATE A CANONICAL REQUEST *************
+            # http://docs.aws.amazon.com/general/latest/gr/sigv4-create-canonical-request.html
+
+
+            # Step 1 is to define the verb (GET, POST, etc.)--already done.
+            # Set in other places
+
+            # Step 2: Create canonical URI--the part of the URI from domain to query 
+            # string (use '/' if no path)
+            $canocial_uri = '/'
+
+            ## Step 3: Create the canonical query string. In this example, request
+            # parameters are passed in the body of the request and the query string
+            # is blank.
+            if ($null -ne $awsQueryString) {
+                $canonicalQuerystring = $awsQueryString
+            }
+            else {
+                $canonicalQuerystring = ""
+            }
+
+            # Step 4: Create the canonical headers and signed headers. Header names
+            # must be trimmed and lowercase, and sorted in code point order from
+            # low to high. Note that there is a trailing \n.
+            $canonical_headerData = New-Object System.Text.StringBuilder
+            $headerData = New-Object System.Collections.Hashtable
+
+            $SignedHeaders -split ";" | foreach {
+                $name = if ($_ -eq "host") {
+                    "awsHost"
+                }
+                else {
+                    $_.replace("-","_")
+                }
+
+                $value = Get-Variable -Name $name -ValueOnly
+                $canonical_headerData.Append("$_" + ":$value`n") | Out-Null
+                $headerData.Add("$_",$value)
+            }
+
+            $canonical_headers = $canonical_headerData.ToString()
+
+            # Step 5: Create the list of signed headers. This lists the headers
+            # in the canonical_headers list, delimited with ";" and in alpha order.
+            # Note: The request can include any headers; canonical_headers and
+            # signed_headers lists those that you want to be included in the 
+            # hash of the request. "Host" and "x-amz-date" are always required.
+            # This is passed to the function and is used to build the canonical_headers
+
+            # Step 6: Create payload hash (hash of the request body content). For GET
+            # requests, the payload is an empty string ("").
+            # Only Usefull if passing request parameters
+            if ($awsRequestParmeters -eq $null) {
+                $payloadData = ' '
+            }
+            else {
+                $payloadData = $awsRequestParmeters
+            }
+
+            $payload_hash = getSHA256 -data $payloadData
+
+            # Step 7: Combine elements to create canonical request
+            $canonical_request = "$Method`n$canocial_uri`n$canonicalQuerystring`n$canonical_headers`n$SignedHeaders`n$payload_hash"
+
+            # ************* TASK 2: CREATE THE STRING TO SIGN*************
+            # Match the algorithm to the hashing algorithm you use, either SHA-1 or
+            # SHA-256 (recommended)
+            $credential_scope = "$dateStamp/$Region/$Service/aws4_request"
+            $encoded_canonical_request = getSHA256 -data $canonical_request
+            $string_to_sign = "$Algorithm`n$x_amz_date`n$credential_scope`n$encoded_canonical_request"
+    
+            # ************* TASK 3: CALCULATE THE SIGNATURE *************
+            # Create the signing key using the function defined above.
+            $signing_key = getSignatureKey -key $secretkey -dateStamp $datestamp -regionName $Region -serviceName $Service
+    
+            # Sign the string_to_sign using the signing_key
+            $signature = HmacSHA256 -key $signing_key -data $string_to_sign -StringOut
+
+            # ************* TASK 4: ADD SIGNING INFORMATION TO THE REQUEST *************
+            # Put the signature information in a header named Authorization.
+
+            $authorization_data = "$Algorithm Credential=$accesskey/$credential_scope, SignedHeaders=$SignedHeaders, Signature=$signature"
+    
+            $headerData.Add("authorization",$authorization_data)
+    
+            $out = @{
+                HeaderData = $headerData
+                RequestParameters = $awsRequestParmeters
+            }
+    
+            Return $out
+        }
+
+        function AuthenticateTo-VaultAWSIam {
+            <#
+            .SYNOPSIS
+
+            Retrieves a Vault token using IAM Auth
+ 
+            .DESCRIPTION
+
+            Retrieves a Vault token by creating a AWS V4 Signing Request and authenticating to AWS and passing the infomration to VAULT. Eliminates the need to have the Vault client installed in order to authenticate to vault on a windows system.
+ 
+            .OUTPUTS
+
+            A string of the Vault token
+ 
+            .PARAMETER yamlRoleName
+
+            The rolename of as defined in the yaml file in Github that is allowed to connect to Vault see below for example.
+            Version: 1
+
+            Notifications:
+                Email: Example_DL@domain.com
+
+            Admins:
+                - ID: I123456
+                Email: Example_User@domain.com
+
+            Roles:
+                ExampleRole: <----- yaml Role Name
+                  AWS:
+                    IAMRoles:
+                    - Example-IAM-Role
+                  AllowedDomains:
+                    - example.domain.com
+
+            .PARAMETER awsIAMRole
+
+            The IAM Role attached to the EC2. Must match IAM role defined in the yalm file
+            
+            
+            Version: 1
+
+            Notifications:
+                Email: Example_DL@domain.com
+
+            Admins:
+                - ID: I123456
+                Email: Example_User@domain.com
+
+            Roles:
+                ExampleRole:
+                  AWS:
+                    IAMRoles:
+                    - Example-IAM-Role <----- This should be the IAM role assigned to the EC2 instance
+                  AllowedDomains:
+                    - example.domain.com
+
+            .PARAMETER awsRegion
+
+            The AWS Region that you want to connect to.
+            Default: Uses the output of: (Invoke-RestMethod -Uri http://169.254.169.254/latest/dynamic/instance-identity/document -Method Get).region
+            If a region cannot be determined the function will stop and throw and error.
+
+            .PARAMETER VaultURL
+
+            The url for Vault.
+            Default: https://vault.domain.com
+
+            .PARAMETER VaultNamespace
+
+            The namespace path.
+            Example: namespace/ExampleSubFolder1
+  
+            .EXAMPLE
+
+            $token = AuthenticateTo-VaultAWSIam -yamlRoleName "ExampleRole" -awsIAMRole "Example-IAM-Role" -awsRegion "us-west-2" -VaultURL "https://vault.domain.com" -VaultNamespace "namespace"
+ 
+            .EXAMPLE
+
+            $token = AuthenticateTo-VaultAWSIam -yamlRoleName "ExampleRole" -awsIAMRole "Example-IAM-Role" -VaultNamespace "namespace"
+            #>
+            [CmdletBinding()]
+            param (
+                [Parameter(Mandatory)]
+                [string]
+                $yamlRoleName,
+
+                [Parameter()]
+                [string]
+                $awsIAMRole,
+        
+                [Parameter()]
+                [string]
+                $awsRegion = (Invoke-RestMethod -Uri http://169.254.169.254/latest/dynamic/instance-identity/document -Method Get -ErrorAction SilentlyContinue).region,
+        
+                [Parameter()]
+                [uri]
+                $VaultURL = "https://vault.domain.com",
+
+                [Parameter(Mandatory)]
+                [string]
+                $VaultNamespace
+            )
+            Begin {
+                #force TLS1.2
+                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+                function Set-Base64 {
+                    param (
+                        $Plaintext
+                    )
+
+                    $b = [System.Text.Encoding]::UTF8.GetBytes($Plaintext)
+                    $64 = [System.Convert]::ToBase64String($b)
+
+                    return $64
+                }
+            }
+            Process {
+                $AWSData = Build-ASWSignedRequest `
+                    -AwsIAMRole $awsIAMRole `
+                    -Service "sts" `
+                    -Region $awsRegion `
+                    -SignedHeaders "content-type;host;x-amz-date;x-amz-security-token" `
+                    -Content_Type "application/x-www-form-urlencoded; charset=utf-8" `
+                    -awsRequestParmeters "Action=GetCallerIdentity&Version=2011-06-15"
+        
+                #Build JSON Payload for Vault using Base-64 Encoding 
+                $body = @{
+                    role = $yamlRoleName
+                    iam_http_request_method = "POST"
+                    iam_request_headers = $(set-base64 -plaintext $($AWSData.HeaderData | ConvertTo-Json ))
+                    iam_request_url = $(set-base64 -plaintext "https://sts.$awsRegion.amazonaws.com")
+                    iam_request_body = $(set-base64 -plaintext $AWSData.RequestParameters)
+                } | convertto-json
+
+                #Send WebRequest to NameSpace AWS Auth using POST and JSON Data 
+                
+                try {
+                    $uri = "$($VaultURL.AbsoluteUri)v1/$($vaultNamespace)/auth/aws/login"
+                    $result = Invoke-RestMethod -uri $uri -Method POST -Body $body
+                    $vaultToken = $result.auth.client_token
+                }
+                catch {
+                    $vaultError = $(($_.ErrorDetails.Message.ToString() | ConvertFrom-Json).Errors)
+                    $message = "Error message from Vault: $vaultError"
+                    if ($false -eq [string]::IsNullOrWhiteSpace($vaultError)) {
+                        Write-Log -Message $message -Level Error
+                    }
+
+                    $message = "Error with authenticating to Vault using the Automated IAM Auth process"
+                    Write-Log -Message $message -Level Error -ThrowError
+                }
+        
+            }
+            End {
+                return $vaultToken
+            }
+
+        }
+
+        function Get-AWSCerts {
+            $body = @{
+
+            } | ConvertTo-Json
+
+            $awsRegion = (Invoke-RestMethod -Uri http://169.254.169.254/latest/dynamic/instance-identity/document -Method Get -ErrorAction SilentlyContinue).region
+
+            $requestInfo  = Build-ASWSignedRequest `
+                -Service acm `
+                -Region $awsRegion `
+                -SignedHeaders "content-type;host;x-amz-date;x-amz-security-token;x-amz-target" `
+                -Content_Type "application/x-amz-json-1.1" `
+                -X_Amz_Target "CertificateManager.ListCertificates" `
+                -awsRequestParmeters $body
+
+            $uri = "https://acm.$awsRegion.amazonaws.com/"
+            $results = Invoke-RestMethod -Uri $uri -Method Post -Headers $requestInfo.HeaderData -Body $body
+
+            $results.CertificateSummaryList
+        }
+
+        function Import-AWSCert {
+            param (
+                $CertificateBody,
+                $CertificatePrivateKey,
+                $CertificateChain,
+                $CertificateARN
+            )
+
+            $bodyData = @{
+                Certificate = $(EncodeTo-Base64 -ValueToEncode $CertificateBody)
+                PrivateKey = $(EncodeTo-Base64 -ValueToEncode $CertificatePrivateKey)
+                CertificateChain = $(EncodeTo-Base64 -ValueToEncode $CertificateChain)
+            }
+
+            if ($CertificateARN) {
+                $bodyData.Add("CertificateArn",$CertificateARN.toString().Trim()) | Out-Null
+            }
+
+            $body = $bodyData | ConvertTo-Json
+            
+            $awsRegion = (Invoke-RestMethod -Uri http://169.254.169.254/latest/dynamic/instance-identity/document -Method Get -ErrorAction SilentlyContinue).region
+
+            $requestInfo  = Build-ASWSignedRequest `
+                -Service acm `
+                -Region $awsRegion `
+                -SignedHeaders "content-type;host;x-amz-date;x-amz-security-token;x-amz-target" `
+                -Content_Type "application/x-amz-json-1.1" `
+                -X_Amz_Target "CertificateManager.ImportCertificate" `
+                -awsRequestParmeters $body
+            
+            $uri = "https://acm.$awsRegion.amazonaws.com/"
+            $results = Invoke-RestMethod -Uri $uri -Method Post -Headers $requestInfo.HeaderData -Body $body
+            
+            $message = "The Certificate was imported. Its Arn is: $($results.CertificateArn)"
+            Write-Log $message -InfoTextColor Green
+            #>
+        }
+
+        function AuthenticateTo-VaultLDAP {
+            param (
+                [parameter(Mandatory)]
+                [PSCredential]
+                $Credentials,
+
+                [parameter()]
+                [uri]
+                $VaultURL
+            )
+
+            #force TLS1.2
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+            $bodyData = @{
+                password = $Credentials.GetNetworkCredential().Password
+            }
+
+            $body = $bodyData | ConvertTo-Json
+
+            try  {
+                $uri = Normalize-Uri "$($VaultURL.AbsoluteUri)/v1/auth/ldap/login/$($Credentials.UserName)"
+        
+                $results = Invoke-RestMethod -Uri $uri -Method Post -Body $body -ContentType "application/json"
+                $clientToken = $results.auth.client_token
+
+                Return $clientToken
+            }
+            catch {
+                $vaultError = $(($_.ErrorDetails.Message.ToString() | ConvertFrom-Json).Errors)
+                $message = "Error message from Vault: $vaultError"
+                if ($false -eq [string]::IsNullOrWhiteSpace($vaultError))
+                {
+                    Write-Log -Message $message -Level Error
+                }
+
+                $message = "Error Attempting to authenticate to $($uri)"
+                Write-Log -Message $message -Level Error -ThrowError
+            }
+    
+        }
+
+        function AuthenticateTo-VaultToken {
+            param (
+                [parameter(Mandatory)]
+                [string]
+                $Token,
+
+                [parameter(Mandatory)]
+                [uri]
+                $VaultURL
+            )
+
+            #force TLS1.2
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+            $header = @{
+                "X-Vault-Token" = $Token
+            }
+            
+            $uri = Normalize-Uri "$($VaultURL.AbsoluteUri)/v1/auth/token/lookup-self"
+
+            try {
+                $results = Invoke-RestMethod -Uri $uri -Method Get -Headers $header
+            }
+            catch {
+                $vaultError = $(($_.ErrorDetails.Message.ToString() | ConvertFrom-Json).Errors)
+                $message = "Error message from Vault: $vaultError"
+                if ($false -eq [string]::IsNullOrWhiteSpace($vaultError))
+                {
+                    Write-Log -Message $message -Level Error
+                }
+
+                $message = "Issues authenticating to vault (($uri)) using the token $token. Please verify the token."
+                Write-Log -Message $message -Level Error -ThrowError
+            }
+
+            if ($true -eq $results.renewable) {
+                $bodydata = @{
+                    increment = "168h"
+                }
+                $body = $bodydata | ConvertTo-Json
+
+                $uri = Normalize-Uri "$($VaultURL.AbsoluteUri)/v1/auth/token/renew-self"
+                try {
+                    Invoke-RestMethod -Uri $uri -Body $body -Method Post -Headers $header -ContentType "application/json" | Out-Null
+                }
+                catch {
+                }
+            }
+
+            Return $token
+        }
+
+        function Generate-CSR {
+            param (
+                [parameter(Mandatory)]
+                [string]
+                $CertSubjectName,
+                
+                [parameter()]
+                $CertSanNames,
+                
+                [parameter()]
+                [Switch]
+                $CertExportable = $false,
+                
+                [parameter(Mandatory)]
+                $CertHashAlgorithm,
+
+                [parameter(Mandatory)]
+                $CertKeyLength,
+
+                [parameter(Mandatory)]
+                $CertWorkingDirectory
+            )
+
+            $certInfFileName = "$($CertSubjectName -replace '<|>|:|"|\\|\/|\||\?|\*','').inf"
+            $certInfFile = Join-Path -Path $CertWorkingDirectory -ChildPath $certInfFileName
+            
+            $certReqFileName = $certInfFileName.Replace(".inf",".req")
+            $certReqFile = Join-Path -Path $CertWorkingDirectory -ChildPath $certReqFileName
+
+            #generate SAN value(s) if present
+            if ($CertSanNames -ne $null) {
+                #vault should NOT be assing the SubjectName to the certs. 
+                #It must be defined or browsers will throw errors
+                $certSANData = [System.Text.StringBuilder]::new()
+                $certSANData.Append("[Extensions]`r`n") | Out-Null
+                $certSANData.Append("2.5.29.17 = `"{text}`"`r`n") | Out-Null
+                #Vault will sometimes be configured to add teh CN to the SAN List and sometimes it will not.
+                #Uncomment the line below if it doesn't (Will fix later to make it a switch)
+                #$certSANData.Append("_continue_ = `"dns=$certSubjectName&`"`r`n") | Out-Null
+
+                $splitCertSanNames = $CertSanNames -split ",|;"
+                foreach ($value in $splitCertSanNames) {
+                    $certSANData.Append("_continue_ = `"dns=$($value.trim())&`"`r`n") | Out-Null
+                }
+
+                $certSANDataString = $certSANData.ToString()
+            }
+
+            $certInfFileData = @"
+[Version]
+Signature = `$Windows NT$    
+
+[NewRequest]
+Subject       = "CN=$CertSubjectName"
+KeySpec       = 1
+KeyLength     = $CertKeyLength
+Exportable    = $CertExportable
+HashAlgorithm = $CertHashAlgorithm
+KeyAlgorithm  = RSA
+MachineKeySet = True
+ProviderName  = "Microsoft RSA SChannel Cryptographic Provider"
+RequestType   = PKCS10
+KeyUsage      = 0xa0
+ 
+[EnhancedKeyUsageExtension]
+OID = 1.3.6.1.5.5.7.3.1
+
+$certSANDataString
+"@
+
+            try {
+                Write-Log "Writing .inf file to to $certInfFile"
+                $certInfFileData | Out-File -FilePath $certInfFile -Force | Out-Null
+
+                Write-Log "Generating CSR"
+                Certreq -new -f -q $certInfFile $certReqFile | Out-Null
+            }
+            catch {
+                Write-log -Message "Error Attempting to generate the ini File or creating the CSR. Please check the ini file and/or run the following command Manually`n:
+                Certreq -new -f -q $certInfFile $certReqFile" -Level Error
+                Write-Log $_ -Level Error -ThrowError
+            }
+            $certReqData = Get-Content -Path $certReqFile | Out-String
+    
+            Return $certReqData
+        }
+
+        function Process-Certificate {
+            param (
+                [parameter(Mandatory)]
+                $CertificateData,
+
+                [parameter(Mandatory)]
+                [ValidateSet("RootCA","Intermediate","Server")]
+                [string]
+                $CertType,
+
+                [parameter()]
+                [String]
+                $CertificateFolder,
+                
+                [parameter()]
+                [Switch]
+                $Force = $false
+
+            )
+
+            Switch ($CertType) {
+                'RootCA' {
+                    $certStorePath = "Cert:\LocalMachine\Root"
+                    $certStorePathFriendly = "Certificates - Local Computer\Trusted Root Certification Authorities\Certificates"
+                }
+                'Intermediate' {
+                    $certStorePath = "Cert:\LocalMachine\CA"
+                    $certStorePathFriendly = "Certificates - Local Computer\Intermediate Certification Authorities\Certificates"
+                }
+                'Server' {
+                    $certStorePath = "Cert:\LocalMachine\My"
+                    $certStorePathFriendly = "Certificates - Local Computer\Personal\Certificates"
+                }
+            }
+
+            $message = "Checking to see if the $CertType certificate is installed and the thumbprints match" 
+            Write-Log -Message $message
+            
+            $allCerts = Get-ChildItem $certStorePath -Recurse
+
+            # Reads the certificate without writing it to disk to check if we need to install it
+            $certificateInByteArray = [System.Text.Encoding]::UTF8.GetBytes($CertificateData)
+            $certificateInfo = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($certificateInByteArray)
+            $certificateSubjectName = ($certificateInfo.Subject -split ",")[0].Replace("CN=","")
+            
+            $importCertificate = $false
+            $certInstalled = $false
+
+            if ($certificateInfo.Subject -in $allCerts.subject) {
+                $message = "Matching $CertType certificate was found with a subjectName of: $($certificateInfo.Subject)"
+                Write-Log -Message $message
+
+                if ($certificateInfo.Thumbprint -in $allCerts.Thumbprint) {
+                    $message = "The certificate is still valid for: $($certificateInfo.Subject)"
+                    Write-Log -Message $message -InfoTextColor Green
+                }
+                else {
+                    $installedCertificate = $allCerts | where {$_.subject -eq $certificateInfo.Subject}
+                    
+                    $message = "A cert was found with the same subjectName, but different thumbprints
+                    Subject: $($certificateInfo.Subject)
+                    Current Thumbprint: $($installedCertificate.Thumbprint)
+                    New Thumbprint: $($certificateInfo.Thumbprint)"
+
+                    ($message -split "`n").Trim() | foreach {
+                        Write-Log -Message $_ -Level Warn
+                    }
+
+                    $message = "Importing the new $CertType certificate"
+                    Write-Log -Message $message
+                    
+                    $importCertificate = $true
+                }
+            }
+            else {
+                $message = "No matching $CertType certificate with a matching subject"
+                Write-Log -Message $message -Level Warn
+
+                $importCertificate = $true
+            }
+
+            if ($true -eq $importCertificate -or $true -eq $Force) {
+                if ($true -eq $Force) {
+                    $message = "Forcing Certificate Install"
+                    Write-Log -Message $message -Level Warn
+                }
+
+                $message = "================================================
+                Importing the certifitcate: $($certificateSubjectName)
+                Thumbprint: $($certificateInfo.Thumbprint)
+                Certificate Path: $certStorePathFriendly
+                ================================================"
+                
+                ($message -split "`n").Trim() | foreach {
+                    Write-Log -Message $_ -Level Warn
+                }
+
+                $CertificateFileName = "$(($certificateSubjectName -replace '<|>|:|"|\\|\/|\||\?|\*','').Trim()).cer"
+                $CertificateFile = Join-Path -Path $CertificateFolder -ChildPath $CertificateFileName
+
+                $message = "Saving the certificate to $CertificateFile"
+                $CertificateData | Out-File -FilePath $CertificateFile -Force
+                try {
+                    Import-Certificate -FilePath $CertificateFile -CertStoreLocation $certStorePath | Out-Null
+
+                    $message = "The certificate has sucessfully been imported!"
+                    Write-Log -Message $message -InfoTextColor Green
+
+                    if ($CertType -eq "Server") {
+                        $certFriendlyName = "$certificateSubjectName - $(Get-Date)"
+                        (Get-ChildItem -Path Cert:\LocalMachine\My\$($certificateInfo.Thumbprint)).FriendlyName = $certFriendlyName
+                    }
+
+                    $certInstalled = $true
+                }
+                catch {
+                    $message = "There was an issue with importing the certificate: $certificateSubjectName ($($certificateInfo.Thumbprint))"
+                    Write-Log -Message $message -Level Error
+
+                    $message = $_
+                    Write-Log -Message $message -Level Error -ThrowError
+                }
+
+                Remove-Item -Path $CertificateFile -Force -Confirm:$false | Out-Null
+            }
+
+            $reuslts = [PSCustomObject]@{
+                CertInstallSucessful = $certInstalled
+            }
+
+            Return $reuslts
+        }
+
+        function AddAnS {
+            param (
+                [parameter(
+                    Mandatory,
+                    Position = 0
+                )]
+                [AllowNull()]
+                [AllowEmptyCollection()]
+                [AllowEmptyString()]
+                $value
+            )
+
+            try {
+                [int]$count = $null
+
+                if ($null -eq $value) {
+                    $count = 0
+                }
+
+                elseif ([int]::TryParse($value,[ref]$count)) {
+                }
+
+                else {
+                    $count = ($value | Measure-Object).Count 
+                }
+
+                if ($count -ne 1) {
+                    Return "s"
+                }
+            }
+            catch {
+            }
+        }
+
+        #############################
+        #Define/Initialize Variables, Create Folders, and Verify connecitivty
+        #############################
+
+        #Instead of having to call dynamic Params by using $PSBoundParameters.DynamicParamName, Dynamic Params are assigned to variables
+        $paramDictionary.Values | foreach {
+            if ($true -eq $_.IsSet) {
+                New-Variable -Name $_.Name -Value $_.Value
+            }
+        }
+        
+        #if either $ExportToFile or $UploadToAWS are set to true, then the cert is marked as exportable
+        if ($true -eq $ExportToFile -or $true -eq $UploadToAWS) {
+            #force the cert to be exportable
+            $Exportable = $true
+        }
+
+        $generateCertificate = $false
+
+        $strippedSubjectName = $SubjectName -replace '<|>|:|"|\\|\/|\||\?|\*',''
+
+        #Setup and create log folder/directory
+        $logFileName = "$($strippedSubjectName)_$(Get-Date -Format FileDateTimeUniversal).txt"
+
+        #Create Log folder if it doesn't exist
+        if (!($LogFolderPath)) {
+            $LogFolderPath = "C:\Logs\$strippedSubjectName"
+        }
+        else {
+            $LogFolderPath = Join-Path -Path $LogFolderPath -ChildPath $strippedSubjectName
+        }
+
+        if ((Test-Path -Path $LogFolderPath) -eq $false) {
+            Write-Log -Message "Creating the directory: $LogFolderPath" -InfoTextColor Green
+            New-Item -Path $LogFolderPath -ItemType Directory -Force | Out-Null
+        }
+        
+        #check and ser WorkingFolder and LogFolder
+        if (!($WorkingFolderPath)) {
+            $WorkingFolderPath = "C:\Certificates\$($strippedSubjectName)_$(Get-date -Format FileDateTimeUniversal)"
+        }
+        else {
+            $WorkingFolderPath = Join-Path -Path $WorkingFolderPath -ChildPath "$($strippedSubjectName)_$(Get-Date -Format FileDateTimeUniversal)"
+        }
+
+        if ((Test-Path $WorkingFolderPath) -eq $false) {
+            Write-Log -Message "Creating the Directory: $WorkingFolderPath" -InfoTextColor Green
+            New-Item -Path $WorkingFolderPath -ItemType Directory -Force | Out-Null
+        }
+
+        if ($VaultAuthMethod -eq "awsIAM") {
+            #check and see if the AWSRegion needs to be defined and if it can automatically be determined
+            if (!($AWSRegion)) {
+                $message = "Not AWSRegion was defined, checking EC2 instance to see what region it is in"
+                Write-Log -Message $message
+                try {
+                    $uri = "http://169.254.169.254/latest/dynamic/instance-identity/document"
+                    $region = (Invoke-RestMethod -Uri $uri -Method Get).region
+
+                    if ($region) {
+                        $message = "Setting AWSRegion to $region"
+                        Write-Log -Message $message
+                        $AWSRegion = $region
+                    }
+                    else {
+                        $message = "Was able to make a call to $uri and no region was returned. Please define the region using the -AWSRegion parameter" 
+                        Write-Log -Message $message -Level Error -ThrowError
+                    }
+
+                }
+                catch {
+                    $message = "Was not able to make a call to $uri please verify that the url is available"
+                    Write-Log -Message $message -Level Error -ThrowError
+                }
+            }
+            
+            #Check the IAM Role assoicated with the EC2 instance and if a IAM role is defined, make sure the 2 are the same 
+            #or else if none is defined, use the results of the query as the rolename
+            try {
+                $uri = "http://169.254.169.254/latest/meta-data/iam/security-credentials"
+                $results = Invoke-RestMethod -Uri $uri -Method Get
+                $AssoicatedIamProfile = $results
+            }
+            catch {
+                $message = "Was not able retrive the IAM Profile Assiged to this EC2 instance"
+                Write-Log -Message $message -Level Error -ThrowError
+            }
+
+            if (!($AWSIamProfile)) {
+                $AWSIamProfile = $AssoicatedIamProfile
+            }
+            elseif($AWSIamProfile -ne $AssoicatedIamProfile) {
+                $message = "The Profile defined in AWSIamProfile ($AWSIamProfile) doesn't match the infromation found at $uri ($AssoicatedIamProfile)"
+                Write-Log -Message $message -Level Error -ThrowError
+            }
+        }
+
+        #check for and pre-load WebAdministration module
+        $webAdministrationCheck = Get-Module -ListAvailable WebAdministration
+
+        if ($webAdministrationCheck) {
+            Import-Module -Name WebAdministration
+            $message = "WebAdministration Module was found and loaded"
+            Write-Log $message -InfoTextColor Green
+
+            $iisCheck = $true
+
+            $iisInfo = Get-ChildItem IIS:\SslBindings -Recurse
+        }
+        elseif(!($webAdministrationCheck) -and ($InstallIISCert -eq $true)) {
+            $message = "The WebAdministration was not found. Cannot install the IIS Certificate. Please rerun this command withouth the -InstallIISCert paramater"
+            Write-Log -Message $message -Level Error -ThrowError
+        }
+    }
+    
+    ####################################
+    # Script Start
+    ####################################
+
+    Process {
+        $message = "Checking for local machine certs with a subjectName of: $SubjectName"
+        Write-Log -Message $message
+        
+        $allCerts = Get-ChildItem -Path Cert:\LocalMachine\My | where {($_.Subject -split ',')[0].Replace('CN=','') -eq $SubjectName}
+        $allcertCount = ($allCerts | Measure-Object).Count
+
+        $expiringCerts = $allCerts | where {((Get-date $_.GetExpirationDateString()) - (Get-Date)).TotalDays -le $CertExpirationThreshold}
+        $expiringCertCount = ($expiringCerts | Measure-Object).Count
+
+        $message = "Found $($allcertCount) cert$(AddAnS -value $allcertCount) with the subjectname $SubjectName"
+        Write-Log -Message $message
+
+        #if no cert is found, generate new cert
+        if ($allcertCount -eq 0) {
+            $message = "No cert was found for $SubjectName. Generating a new cert."              
+            Write-Log -Message $message -InfoTextColor Green
+            $generateCertificate = $true
+        }
+        elseif ($true -eq $Force) {
+            $message = "Cert generation is being force."
+            Write-Log -Message $message
+            $generateCertificate = $true
+        }
+        elseif ($expiringCertCount -eq $0 -and $false -eq $Force) {
+            $message = "No Expiring Certs, nothing to do"
+            Write-Log -Message $message -Level Error
+        }
+        else
+        {
+            $certResults = New-Object System.Collections.ArrayList
+
+            if ($allcertCount -gt 1 -and $expiringCertCount -ge 1 -and $true -ne $RemoveExpiredCerts) {
+                $message = "Found more than 1 Certificate with the subjectname $SubjectName, recommend using the -RemoveExpiredCerts parameter to clean up any expired certs."
+                Write-Log $message -Level Warn
+            }
+            
+            foreach ($item in $allCerts) {
+                $certExpiresIn = [System.Math]::Round(((Get-date $item.GetExpirationDateString()) - (Get-Date)).TotalDays)
+
+                $certInfoPropterties = [ordered]@{
+                    SubjectName = ($item.Subject -split ',')[0].Replace('CN=','')
+                    IssuedBy = ($item.Issuer -split ',')[0].Replace('CN=','')
+                    Thumbprint = $item.Thumbprint
+                    ExpiresIn = "$certExpiresIn Day$(AddAnS -value $certExpiresIn)"
+                    ExpiresOn = Get-Date $item.GetExpirationDateString()
+                    Expired = if ($certExpiresIn -lt 0){$true}else{$false}
+                }
+
+                if ($iisCheck -eq $true) {
+                    if ($item.Thumbprint -in $iisInfo.Thumbprint) {
+                        $certAssignedInIIS = $true
+                        $certAssignedIIS_Site = ($iisInfo | Where {$_.Thumbprint -eq $item.Thumbprint}).Sites.value
+                    }
+                    else {
+                        $certAssignedInIIS = $false
+                        $certAssignedIIS_Site = ""
+                    }
+
+                    $certInfoPropterties.Add("AssignedInIIS", $certAssignedInIIS)
+                    $certInfoPropterties.Add("IIS_Site", $certAssignedIIS_Site)
+                }
+                $certInfo = New-Object PSCustomObject -Property $certInfoPropterties
+
+                $certResults.Add($certInfo) | Out-Null
+            }
+
+            Write-Log "=============================================="
+            Write-Log "=============================================="
+            Write-Log "Information on found Certs"
+
+            $certResults | Sort -Property ExpiresOn -Descending | foreach {
+                $expiresIn = [int]($_.ExpiresIn -replace " Day*.","")
+
+                if ($expiresIn -gt 7) {
+                    $LogParameters = @{
+                        InfoTextColor = "Green"
+                    }
+                }
+                elseif ($expiresIn -ge 1 -and $expiresIn -le 7) {
+                    $LogParameters = @{
+                        Level = "Warn"
+                    }
+                }
+                else {
+                    $LogParameters = @{
+                        Level = "Error"
+                    }
+                }
+                Write-Log "=============================================="
+                ($_ | Out-String) -split "`n" | where {[string]::IsNullOrWhiteSpace($_.trim()) -eq $false}| foreach {
+                    Write-Log -Message $_ @LogParameters
+                }
+
+                Write-Log "=============================================="
+                Write-Log " "
+            }
+
+
+            Write-Log "=============================================="
+            Write-Log "=============================================="
+            
+
+            #warn if the cert is bound to an IIS Site, but the -InstallIISCert parameter wasn't used
+            $sitesWithAssignedCerts = $certResults | where {($true -eq $_.AssignedInIIS) -and ($false -eq [String]::IsNullOrEmpty($_.IIS_Site))}
+
+            if (($true -in $sitesWithAssignedCerts.AssignedInIIS -or $true -eq $sitesWithAssignedCerts.AssignedInIIS) -and ($false -eq $InstallIISCert)) {
+                $message = "A cert for $SubjectName was found assigned to the site$(AddAnS -value $sitesWithAssignedCerts) $($sitesWithAssignedCerts.Site -join ', '). Its suggested this command is ran with -InstallIISCert"
+                Write-Log -Message $message -Level Warn
+            }
+            
+            $oldestCert = $certResults | Sort-Object -Property ExpiresOn -Descending | Select-Object -First 1
+            $certExpiresInInt = [int]($oldestCert.ExpiresIn -replace " Day*.","")
+            
+            #if oldest cert is below the $CertExpirationThreshold, generate new cert
+            if ($certExpiresInInt -le $CertExpirationThreshold) {
+                $message = "The oldest cert for $($oldestCert.SubjectName) ($($oldestCert.Thumbprint)) is expiring in $certExpiresInInt day$(AddAnS -value $certExpiresInInt). Generating a new cert."
+                Write-Log -Message $message -InfoTextColor Green
+                $generateCertificate = $true
+            } 
+            elseif ($true -eq $InstallIISCert) {
+                #if IIS is bound to a cert that doesn't exist, generate a new cert
+                $iisSiteInfo = $certResults | Where {$_.IIS_Site -eq $iisSiteName}
+                $localThumbprints = (Get-ChildItem -Path Cert:\LocalMachine\$(($iisInfo | Where {$_.Sites.Value -eq $iisSiteName}).Store)).Thumbprint
+
+                #Returns the number of days before the cert bound to the site expires
+                $certExpiresInInt = [int]($iisSiteInfo.ExpiresIn -replace " Day*.","")
+                
+                if ($iisSite.Thumprint -notin $localThumbprints) {
+                    $message = "IIS is bound to a cert with a thumbprint of $iisSiteThumprint which doesn't exist in the cert store. Generating new cert"
+                    Write-Log -Message $message -InfoTextColor Yellow
+                    $generateCertificate = $true
+                }
+                #if IIS is bound to a self signed cert, generate a new cert
+                elseif ($iisSiteInfo.IssuedBy -match $env:COMPUTERNAME) {
+                    $message = "IIS is using a selfsigned cert. Generating a new cert"
+                    Write-Log -Message $message
+                    $generateCertificate = $true
+                }
+
+                #if IIS the IIS cert is below the $CertExpirationThreshold, generate a new cert
+                if ($certExpiresInInt -le $CertExpirationThreshold) {
+                    $message = "The cert for $($iisSiteInfo.SubjectName) ($($iisSiteInfo.Thumbprint)) expires in $certExpiresIn days$(AddAnS -value $certExpiresInInt). Generating a new cert."
+                    Write-Log -Message $message
+                    $generateCertificate = $true
+                }
+            }
+        }
+
+        if ($false -eq $generateCertificate) {
+            $message = "No cert is being created because of one of the following:
+                1. -Force wasn't used
+                2. At least 1 cert was found that wasn't expiring in the next $CertExpirationThreshold days$(AddAnS -value $certExpiresInInt)
+                3. IIS was bound to a valid cert that isn't expiring in the next $CertExpirationThreshold days$(AddAnS -value $certExpiresInInt)"
+
+                $message -split "`n" | foreach {
+                    Write-Log -Message $_.trim() -Level Warn
+                }
+        }
+        else {
+            $message = "Generating new cert for $SubjectName that will expire in $CertTTL"
+            Write-Log -Message $message -InfoTextColor green
+
+            if ($true -eq $Exportable) {
+                $Export = $true
+            }
+
+            $csrDataProperties = [ordered]@{
+                certSubjectName = $SubjectName
+                certHashAlgorithm = $HashAlgorithm
+                certKeyLength = $KeyLength
+                certExportable = $Export
+                CertWorkingDirectory = $WorkingFolderPath
+            }
+
+            if ($SanNames -ne $null) {
+                $csrDataProperties.Add("certSanNames", $SanNames) | Out-Null
+            }
+
+            $message = "Creating a CSR with the following data:"
+            Write-Log -Message $message
+
+            $csrDataProperties.GetEnumerator() | where {$_.Key -ne "CertWorkingDirectory"} | foreach {
+                $message = "`t$($_.key) : $($_.value)"
+                Write-Log -Message $message
+            }
+            $csrData = Generate-CSR @csrDataProperties
+
+            $message = "Preparing to send the csr data to Vault"
+            Write-Log -Message $message
+
+            $message = "Authenticating to Vault using $VaultAuthMethod"
+            Write-Log -Message $message
+
+            #Authenticate to Vault
+            if ($VaultAuthMethod -eq "awsIAM") {
+                $message = "Using AWS IAM Auth"
+                Write-Log -Message $message
+
+                $vaultToken = AuthenticateTo-VaultAWSIam -yamlRoleName $YamLRole -VaultNamespace $VaultNameSpace -awsIAMRole $AWSIamProfile -VaultURL $VaultURL -awsRegion $AWSRegion
+            }
+            
+            if ($VaultAuthMethod -eq "Credentials") {
+                $message = "Using Credentials Auth"
+                Write-Log -Message $message
+
+                $vaultToken = AuthenticateTo-VaultLDAP -Credentials $VaultCredentials -VaultURL $VaultURL
+            }
+
+            if ($VaultAuthMethod -eq "Token") {
+                $message = "Using Token Auth"
+                Write-Log -Message $message
+
+                $vaultToken = AuthenticateTo-VaultToken -Token $VaultToken -VaultURL $VaultURL
+            }
+
+            if ($false -eq [string]::IsNullOrEmpty($VaultToken)) {
+                $vaultHeader = @{
+                    "X-Vault-Token" = $vaultToken
+                }
+            }
+            else {
+                $vaultToken
+                $message = "VaultToken was NUll!"
+                Write-Log $message -Level Error -ThrowError
+            }
+
+            $message = "Submitting the csr data to Vault"
+            Write-Log -Message $message
+
+            #Properties needed for submitting a cert
+            $bodyData = @{
+                csr = $csrData
+                ttl = $CertTTL
+                exclude_cn_from_sans = $false
+            }
+
+            $body = $bodyData | ConvertTo-Json
+
+            try  {
+                $uri = Normalize-Uri "$($VaultURL.AbsoluteUri)/v1/$VaultNameSpace/pki/server/sign/$YamLRole"
+                $certSigningResults = (Invoke-RestMethod -Uri $Uri -Body $body -Method Post -Headers $vaultHeader).data
+            }
+            catch {
+                $_
+                $message = "There was an issue with submitting the certificate"
+                Write-Log -Message $message -Level Error
+
+                $message = "Submitted the following to: $uri"
+                Write-Log -Message $message -Level Error
+                
+                $message = "Header Data: $($vaultHeader.GetEnumerator().Value)"
+                Write-Log -Message $message -Level Error
+
+                $bodyData.GetEnumerator() | foreach {
+                    $message = "$($_.key) : $($_.value)"
+                    Write-Log -Message $message -Level Error
+                }
+
+                $vaultError = $(($_.ErrorDetails.Message.ToString() | ConvertFrom-Json).Errors)
+                $message = "Error message from Vault: $vaultError"
+                if ($false -eq [string]::IsNullOrWhiteSpace($vaultError)) {
+                    Write-Log -Message $message -Level Error -ThrowError
+                }
+            }
+
+            $message = "Sucessfully created the certificate!"
+            Write-Log -Message $message -InfoTextColor Green
+
+
+            if ($certSigningResults.ca_chain[1]) {
+                $message = "Processing the Root Certificate and checking if it needs to be installed"
+                Write-Log -Message $message
+                Process-Certificate -CertificateData $($certSigningResults.ca_chain[1]) -CertType RootCA -CertificateFolder $WorkingFolderPath -Force:$Force.IsPresent | Out-Null
+            }
+            
+            if ($certSigningResults.ca_chain[0]) {
+                $message = "Processing the Intermediate Certificate and checking if it needs to be installed"
+                Write-Log -Message $message
+                Process-Certificate -CertificateData $($certSigningResults.ca_chain[0]) -CertType Intermediate -CertificateFolder $WorkingFolderPath -Force:$Force.IsPresent | Out-Null
+            }
+
+            if ($certSigningResults.certificate) {
+                $message = "Processing the Server Certificate and checking if it needs to be installed"
+                Write-Log -Message $message
+                $serverCertificate = Process-Certificate -CertificateData $certSigningResults.certificate -CertType Server -CertificateFolder $WorkingFolderPath -Force:$Force.IsPresent
+
+                if (($true -eq $InstallIISCert -or $true -eq $Exportable) -and $true -eq $serverCertificate.CertInstallSucessful) {
+                    $tempCertInfo = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new([System.Text.Encoding]::UTF8.GetBytes($certSigningResults.certificate))
+                    $tempCertInfoSubject = ($tempCertInfo.Subject -split ",")[0].Replace("CN=","")
+                }
+
+                if ($true -eq $InstallIISCert -and $false -eq $serverCertificate.CertInstallSucessful) {
+                    $message = "No Certificate was installed, cannot configure IIS with a new cert"
+                    Write-Log -Message $message -Level Error -ThrowError
+                }
+                elseif ($true -eq $InstallIISCert -and $true -eq $serverCertificate.CertInstallSucessful) {
+                    Remove-Module IISAdministration
+                    Import-Module IISAdministration
+                    $allIIS_Sites = Get-IISSite
+
+                    if ($iisPort -in $allSites.Bindings.EndPoint.Port -and $iisPort -notin $allIIS_Sites.Where({$_.Name -eq $iisSiteName}).Bindings.EndPoint.Port) {
+                        $boundSiteName = $allIIS_Sites.Where({$_.Bindings.EndPoint.Port -eq $iisPort}).Name
+
+                        $message = "Cannot Bind the Certificate to $iisSite on port: $iisPort.
+                        Port $iisPort is currently bound to the site: $boundSiteName"
+
+                        $message -split "`n" | foreach {
+                            Write-Log -Message $_.trim() -Level Warn
+                        }
+
+                        $message = "Please use the -iisPort parameter to define the correct port for $iisSiteName"
+                        Write-Log $message -Level Error -ThrowError
+                    }
+                    else {
+                        if ($iisPort -notin $allIIS_Sites.Where({$_.Name -eq $iisSiteName}).Bindings.EndPoint.Port) {
+                            $message = "Creating a new binding on port $iisPort for $iisSiteName"
+                            Write-Log -Message $message
+                            try {
+                                New-WebBinding -Name $iisSiteName -Protocol https -Port $iisPort
+                            }
+                            catch {
+                                $message = "There was an error creating a new binding on port $iisPort for $iisSiteName"
+                                Write-Log -Message $message
+
+                                $message = $_
+                                Write-Log -Message $_ -Level Error -ThrowError
+                            }
+                        }
+
+                        $message = "Binding $tempCertInfoSubject ($($tempCertInfo.Thumbprint)) to $iisPort for the site: $iisSiteName"
+                        Write-Log -Message $message
+
+                        try {
+                            (Get-WebBinding -Name $iisSiteName -Protocol https -Port $iisPort).AddSslCertificate($tempCertInfo.Thumbprint , "My")
+                        }
+                        catch {
+                            $message = "There was an issue binding $tempCertInfoSubject ($($tempCertInfo.Thumbprint)) to $iisPort for the site: $iisSiteName"
+                            Write-Log -Message $message -Level Error
+
+                            $message = $_
+                            Write-Log -Message $_ -Level Error -ThrowError
+                        }
+                    }
+                }
+
+                if ($true -eq $UploadToAWS -or $true -eq $ExportToFile) {
+                    $certChainPem = New-Object -TypeName System.Text.StringBuilder
+                    $certSigningResults.ca_chain | foreach {
+                        $certChainPem.Append(($_ -split "`n") -join "`r`n") | Out-Null
+                        $certChainPem.Append("`r`n") | Out-Null
+                    }
+
+                    $certBodyPem = $certSigningResults.certificate
+                    
+                    $code = @"
+using System;
+using System.IO;
+using System.Security.Cryptography;
+namespace ExportCertToPem
+{
+    public class PrivateKey {
+        public static String ExportPrivateKey(RSACryptoServiceProvider csp)
+        {
+            if (csp.PublicOnly) throw new ArgumentException("CSP does not contain a private key", "csp");
+            var parameters = csp.ExportParameters(true);
+            using (var stream = new MemoryStream())
+            {
+                var writer = new BinaryWriter(stream);
+                writer.Write((byte)0x30); // SEQUENCE
+                using (var innerStream = new MemoryStream())
+                {
+                    var innerWriter = new BinaryWriter(innerStream);
+                    EncodeIntegerBigEndian(innerWriter, new byte[] { 0x00 }); // Version
+                    EncodeIntegerBigEndian(innerWriter, parameters.Modulus);
+                    EncodeIntegerBigEndian(innerWriter, parameters.Exponent);
+                    EncodeIntegerBigEndian(innerWriter, parameters.D);
+                    EncodeIntegerBigEndian(innerWriter, parameters.P);
+                    EncodeIntegerBigEndian(innerWriter, parameters.Q);
+                    EncodeIntegerBigEndian(innerWriter, parameters.DP);
+                    EncodeIntegerBigEndian(innerWriter, parameters.DQ);
+                    EncodeIntegerBigEndian(innerWriter, parameters.InverseQ);
+                    var length = (int)innerStream.Length;
+                    EncodeLength(writer, length);
+                    writer.Write(innerStream.GetBuffer(), 0, length);
+                }
+
+                var base64 = Convert.ToBase64String(stream.GetBuffer(), 0, (int)stream.Length).ToCharArray();
+                TextWriter outputStream = new StringWriter();
+                outputStream.WriteLine("-----BEGIN RSA PRIVATE KEY-----");
+                // Output as Base64 with lines chopped at 64 characters
+                for (var i = 0; i < base64.Length; i += 64)
+                {
+                    outputStream.WriteLine(base64, i, Math.Min(64, base64.Length - i));
+                }
+                outputStream.WriteLine("-----END RSA PRIVATE KEY-----");
+                return outputStream.ToString();
+            }
+        }
+
+        private static void EncodeLength(BinaryWriter stream, int length)
+        {
+            if (length < 0) throw new ArgumentOutOfRangeException("length", "Length must be non-negative");
+            if (length < 0x80)
+            {
+                // Short form
+                stream.Write((byte)length);
+            }
+            else
+            {
+                // Long form
+                var temp = length;
+                var bytesRequired = 0;
+                while (temp > 0)
+                {
+                    temp >>= 8;
+                    bytesRequired++;
+                }
+                stream.Write((byte)(bytesRequired | 0x80));
+                for (var i = bytesRequired - 1; i >= 0; i--)
+                {
+                    stream.Write((byte)(length >> (8 * i) & 0xff));
+                }
+            }
+        }
+
+        private static void EncodeIntegerBigEndian(BinaryWriter stream, byte[] value, bool forceUnsigned = true)
+        {
+            stream.Write((byte)0x02); // INTEGER
+            var prefixZeros = 0;
+            for (var i = 0; i < value.Length; i++)
+            {
+                if (value[i] != 0) break;
+                prefixZeros++;
+            }
+            if (value.Length - prefixZeros == 0)
+            {
+                EncodeLength(stream, 1);
+                stream.Write((byte)0);
+            }
+            else
+            {
+                if (forceUnsigned && value[prefixZeros] > 0x7f)
+                {
+                    // Add a prefix zero to force unsigned if the MSB is 1
+                    EncodeLength(stream, value.Length - prefixZeros + 1);
+                    stream.Write((byte)0);
+                }
+                else
+                {
+                    EncodeLength(stream, value.Length - prefixZeros);
+                }
+                for (var i = prefixZeros; i < value.Length; i++)
+                {
+                    stream.Write(value[i]);
+                }
+            }
+        }
+    }
+}
+"@
+                    Add-Type -TypeDefinition $code -Language CSharp -ErrorAction SilentlyContinue
+                    
+                    #Open the current Cert Store and extract the certificate. Eliminates the need to export the cert to a PFX first.
+                    $certCollection = [System.Security.Cryptography.X509Certificates.X509Store]::new([System.Security.Cryptography.X509Certificates.StoreName]::My, [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine)
+                    $certCollection.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+
+                    $activeCertToUploadToExport = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new($($certCollection.Certificates | where {$_.thumbprint -eq $tempCertInfo.Thumbprint} ))
+
+                    $privateKey = [ExportCertToPem.PrivateKey]::ExportPrivateKey($activeCertToUploadToExport.PrivateKey)
+
+                    #Export the pem data to file if requested
+                    if ($true -eq $ExportToFile) {
+                        #Using System.IO.File over Out-File to ensure that we write the file using UTF-8 wihtout BOM
+
+                        #export the cert to a .pem
+                        $certFilePath = $(Join-Path -Path $WorkingFolderPath -ChildPath "$($strippedSubjectName)_cert.pem")
+                        
+                        $message = "Exporting the certificate to $certFilePath"
+                        Write-Log -Message $message
+
+                        #($certBodyPem -split "`n") -join "`r`n" | Set-Content -Path$certFilePath -Encoding
+                        [System.IO.File]::WriteAllLines($certFilePath, ($certBodyPem -split "`n") -join "`r`n", [System.Text.UTF8Encoding]::new($false))
+                        
+                        #export the private key to a .pem
+                        $privateKeyFilePath = $(Join-Path -Path $WorkingFolderPath -ChildPath "$($strippedSubjectName)_key.pem")
+                        
+                        $message = "Exporting the private key to $privateKeyFilePath"
+                        Write-Log -Message $message
+
+                        #$privateKey | Out-File -FilePath $privateKeyFilePath -Encoding default
+                        [System.IO.File]::WriteAllLines($privateKeyFilePath, $privateKey, [System.Text.UTF8Encoding]::new($false))
+                        
+                        #export the rootCA to a .pem
+                        $certCAChainFilePath = Join-Path -Path $WorkingFolderPath -ChildPath "$($strippedSubjectName)_rootCA.pem"
+                        
+                        $message = "Exporting the CA Chain to $certCAChainFilePath"
+                        Write-Log -Message $message
+
+                        #$certChainPem.ToString() | Out-File -FilePath $certCAChainFilePath -Encoding default
+                        [System.IO.File]::WriteAllLines($certCAChainFilePath, $certChainPem.ToString(), [System.Text.UTF8Encoding]::new($false))
+                    }
+
+                    if ($true -eq $UploadToAWS) {
+                        $message = "Starting the upload to AWS"
+                        Write-Log $message
+
+                        $importAWSCertArgs = @{
+                            CertificateBody = $certBodyPem
+                            CertificatePrivateKey = $privateKey
+                            CertificateChain = $certChainPem.ToString()
+                        }
+
+                        #Ensure that the private key isn't stored anymore
+
+                        $AwsCerts = Get-AWSCerts
+                    
+                        if ($SubjectName -in $AwsCerts.DomainName) {
+                            $message = "A cert for $SubjectName was found in AWS, re-importing the certificate"
+                            Write-Log -Message $message
+
+                            $importAWSCertArgs.CertificateARN = ($AwsCerts | Where {$_.DomainName -eq $SubjectName}).CertificateArn
+                        }
+                        elses {
+                            $message = "No cert for $SubjectName was found in AWS. Importing the new certificate"
+                            Write-Log -Message $message
+                        }
+                    
+                        Import-AWSCert @importAWSCertArgs
+
+                        #Ensure that the private key isn't stored anymore
+                        $importAWSCertArgs = $null
+                    }
+                }
+            }
+        }
+    }
+
+    End {
+        if ($true -eq $RemoveExpiredCerts) {
+            foreach ($item in $certResults) {
+                if ($item.expired -eq $true) {
+                    Remove-Item -Path Cert:\LocalMachine\My\$($item.Thumbprint) -Force:$true -Confirm:$false
+                }
+            }
+        }
+
+        if ($false -eq $ExportToFile) {
+            Remove-Item -Path $WorkingFolderPath -Recurse -Force:$true -Confirm:$false -ErrorAction SilentlyContinue
+        }
+        else {
+            Remove-Item -Path $WorkingFolderPath -Exclude "*.pem" -Recurse -Force:$true -Confirm:$false -ErrorAction SilentlyContinue
+        }
+    }
+}
