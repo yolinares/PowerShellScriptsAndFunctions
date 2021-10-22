@@ -1,0 +1,1443 @@
+################
+# These variables will need to be changed depending on the envirnoment the script is ran in
+################
+
+$DomainName = ""
+$adminAccountSuffix = ""
+
+$apiAccountUsername = $args[0]
+
+$apiAccountPassword = $args[1]
+
+
+#default
+$ThycoticURL = ""
+$SecretTemplateName = ""
+
+$userAdminFolderName =""
+$adminGroupName = ""
+
+#Checkout time in minutes 12Hours = 720 // 16Hours = 960 // 24Hours = 1440
+$secretCheckOutTime = 
+
+
+################
+# Constant Variables
+################
+
+$logFileDirectory = "C:\Logs\Thycotic"
+$logFileName = "CreateThycoitcAdminAccounts_$((Get-Date).ToFileTime()).txt"
+$logFilePath = "$LogFileDirectory\$LogFileName"
+################
+# Run as a test and suppress on screen output
+################
+
+#Set to $true to not create accounts
+#This should always ben true when pulled from github
+$testRun = $false
+
+#Set to $true to suppress extra log output to the screen
+$quite = $false
+
+#Set to $true for more log data
+$verbose = $true
+
+#Force the script to stop when error is thrown
+$ErrorActionPreference = "Stop"
+
+###################################################################
+#
+# What this script Does
+# 1.  Authenticate to Thycotic
+#       Authenticates to Thycotic and stores the data in a hastable so it can be used throught 
+# 2.  Get Admin Folder ID
+#       Gets the Foder ID for the Folder that all the secrets will be stored in
+# 3.  Get Template ID
+#       Gets the Template ID for the secret templated used to create the secrets
+# 4.  Get thycoticAdmin group from Thycotic
+#       Gets information about the Admin group for thycotic. Used to ensure that admins have access to the
+#       secrets that are imported.
+# 5.  Get all Admin secrets from Thycotic
+#       Get a list of all the admin secrets in Thycotic. Looks for all accounts in the Admin Folder
+# 6.  Get all user accounts from Thycotic
+#       Gets all the active users (not secrets) accounts from Thycotic. This data is compared wiht the admin accounts found
+#       in AD to figure out what secrets beed to be created
+# 7.  Get all admin user accounts from AD
+#       Searches AD for all accounts that end in the same suffix as defined in $adminAccountSuffix
+# 9.  Add Admin Secrets to Thycotic
+#       Adds Admin Secrets to thycotic.
+# 10. Remove Admin Secrets
+#       Remove admin secrets where the user asscoicated with the secret is no longer active
+#
+###################################################################
+
+
+################
+# Functions For the script
+################
+
+function Write-Log { 
+    [CmdletBinding()] 
+    Param     ( 
+        [Parameter(Mandatory=$true, 
+                    ValueFromPipelineByPropertyName=$true,
+                    ValueFromPipeline = $true)]
+        [string]
+        $Message, 
+ 
+        [string]
+        $Path=$LogFilePath,
+
+        [ValidateSet("Error","Warn","Info")]
+        [string]
+        $Level="Info",
+        
+        [Switch]
+        $Throw,
+        
+        [Switch]
+        $quite = $quite
+    )
+    
+    DynamicParam {
+        $paramDictionary = New-Object System.Management.Automation.RuntimeDefinedParameterDictionary
+        #Name of the Parameter
+        $paramName = "TextColor"
+            
+        #Create Attributecollection objects
+        $attributeCollection = New-Object System.Collections.ObjectModel.Collection[System.Attribute]
+
+        #Create and set the parameter Attributes (needed even if no attributes set)
+        $paramAttribute = New-Object System.Management.Automation.ParameterAttribute
+        $attributeCollection.Add($paramAttribute)
+        
+        #Generate and set the ValidateSet 
+        $validationSet = @([consoleColor].GetEnumValues())
+        $validationSetAttribute = New-Object System.Management.Automation.ValidateSetAttribute($validationSet)
+        
+        #Add the ValidationSet ot the attributes collection
+        $attributeCollection.Add($validationSetAttribute)
+
+        #Create the parameter and add it to the dynamic parameters
+        $param = New-Object System.Management.Automation.RuntimeDefinedParameter($paramName, [string], $attributeCollection)
+        $paramDictionary.Add($paramName,$param)
+
+        return $paramDictionary
+    }
+
+    Begin {
+            if ($PSBoundParameters[$paramName]) {
+            $foregroundColor = @{
+                ForegroundColor =$PSBoundParameters[$paramName]
+            }
+        }
+    } 
+    Process {
+        # If attempting to write to a log file in a folder/path that doesn't exist create the file including the path. 
+        if (!(Test-Path $Path)) { 
+            Write-Verbose "Creating $Path." 
+            $NewLogFile = New-Item $Path -Force -ItemType File 
+        } 
+
+        # Format Date for our Log File 
+        $FormattedDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss" 
+ 
+        # Write message to error, warning, or verbose pipeline and specify $LevelText 
+        switch ($Level) { 
+            'Error' { 
+                if ($false -eq $quite) {
+                    if ($false -eq $Throw) {
+                        Write-Host $Message -ForegroundColor Red
+                    }
+                    else {
+                        Throw $Message
+                    }
+                }
+                $LevelText = 'ERROR:' 
+            } 
+            'Warn' { 
+                if ($false -eq $quite) {
+                    Write-Host $Message -ForegroundColor Yellow
+                }
+                $LevelText = 'WARNING:' 
+            } 
+            'Info' {
+                if ($false -eq $quite) {
+                    Write-Host $Message @foregroundColor
+                }
+                $LevelText = 'INFO:' 
+            } 
+        } 
+
+        # Write log entry to $Path 
+        "$FormattedDate $LevelText $Message" | Out-File -FilePath $Path -Append 
+    } 
+    End { 
+    } 
+}
+
+function Get-ThycoticAuthenitcationToken {
+    param(
+        [parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $ThycoticUserName,
+
+        [parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $ThycoticPassword,
+
+        [parameter(Mandatory)]
+        [ValidateScript({$null -ne $_.AbsoluteURI-and $_.Scheme -match "http|https"})]
+        [uri]
+        $ThycoticUrl
+    )
+
+    #force TLS1.2
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+    #Stores the creds to authenticate to Thycotic
+    $invokeBody = @{
+        username = $ThycoticUserName
+        password = $ThycoticPassword
+        grant_type = "password"
+    }
+
+    $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+    $uriBuilder.Path = '/oauth2/token'
+    $uri = $uriBuilder.Uri.ToString()
+
+    try {
+        #Connects to the thycotic server and retrive the token
+        $invokeResponse = Invoke-RestMethod -Uri $uri -Method Post -Body $invokeBody
+    }
+    catch {
+        throw $_
+    }
+    
+    $headerInfo = @{"Authorization" = "Bearer $($invokeResponse.access_token)"}
+
+    $headerInfo
+}
+
+function Find-ThycoticSecret {
+    [CmdletBinding(DefaultParameterSetName="Default")]
+    param (
+        [parameter(ParameterSetName="byID")]
+        [int]
+        $SecretID,
+
+        [parameter(ParameterSetName="byQuery")]
+        [Alias("q.filter.searchText")]
+        [string]
+        $Name,
+
+        [parameter(ParameterSetName="byQuery")]
+        [Alias("q.filter.secretTemplateId")]
+        [int]
+        $SecretTemplateId,
+        
+        [parameter(ParameterSetName="byQuery")]
+        [Alias("q.filter.folderId")]
+        [int]
+        $FolderId,
+        
+        [parameter(ParameterSetName="byQuery")]
+        [Alias("q.filter.includeSubFolders")]
+        [bool]
+        $IncludeSubFolders,
+        
+        [parameter(ParameterSetName="byQuery")]
+        [Alias("q.filter.includeRestricted")]
+        [bool]
+        $IncludeRestrictedSecrets,
+
+        [parameter(ParameterSetName="byQuery")]
+        [Alias("q.filter.includeActive")]
+        [bool]
+        $IncludeActiveSecrets,
+
+        [parameter(ParameterSetName="byQuery")]
+        [parameter(ParameterSetName="byID")]
+        [Alias("q.filter.includeInactive")]
+        [bool]
+        $IncludeInactiveSecrets,
+
+        [parameter(ParameterSetName="byQuery")]
+        [Alias("q.filter.siteId")]
+        [int]
+        $SiteID,
+
+        [parameter(ParameterSetName="byQuery")]
+        [Alias("q.filter.isExactMatch")]
+        [bool]
+        $ExactMatch,
+        
+        [parameter(ParameterSetName="byQuery")]
+        [Alias("q.take")]
+        [int]
+        $MaxResults,
+        
+        [parameter(Mandatory)]
+        [ValidateScript({$null -ne $_.AbsoluteURI-and $_.Scheme -match "http|https"})]
+        [uri]
+        $ThycoticUrl,
+        
+        [parameter(Mandatory)]
+        [hashtable]
+        $ThycoticAuthenticationToken
+    )
+
+    if ($PSCmdlet.ParameterSetName -eq "byID") {
+        $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+        $uriBuilder.Path = "/api/v1/secrets/$SecretID/summary"
+        $uri = $uriBuilder.Uri.ToString()
+    }
+    else {
+        $queryString = [Web.HttpUtility]::ParseQueryString('')
+
+        $MyInvocation.MyCommand.Parameters.GetEnumerator() | 
+            where {$_.Value.Aliases -like "q.*" -and $PSBoundParameters.Keys -contains $_.Key} |
+            foreach {
+                $queryString[$_.Value.Aliases[0].replace('q.','')] = $PSBoundParameters[$_.Key]
+            }
+
+        $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+        $uriBuilder.Path = '/api/v1/secrets'
+        $uriBuilder.Query = $queryString.ToString()
+        $uri = $uriBuilder.Uri.ToString()
+    }
+    
+    $invokeResults = Invoke-RestMethod -Method Get -Uri $uri -Headers $ThycoticAuthenticationToken
+        
+    if ($invokeResults) {
+        if ($invokeResults.take -lt $invokeResults.total) {
+            $PSBoundParameters.MaxResults = $invokeResults.total
+            & $($PSCmdlet.MyInvocation.MyCommand.Name) @PSBoundParameters
+        }
+        else {
+            switch ($PSCmdlet.ParameterSetName) {
+                "byID" {$invokeResults}
+                "byQuery" {
+                    if ($true -eq $PSBoundParameters.ExactMatch) {
+                        $invokeResults.records | where {$_.Name -eq $PSBoundParameters.Name}
+                    }
+                    else {
+                        $invokeResults.records 
+                    }
+                }
+            }
+        }
+    }
+}
+
+function Get-ThycoticSecret {
+    [CmdletBinding()]
+    param (
+        [parameter(Mandatory)]
+        [int]
+        $SecretID,
+        
+        [parameter(Mandatory)]
+        [ValidateScript({$null -ne $_.AbsoluteURI-and $_.Scheme -match "http|https"})]
+        [uri]
+        $ThycoticUrl,
+        
+        [parameter(Mandatory)]
+        [hashtable]
+        $ThycoticAuthenticationToken
+    )
+
+    $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+    $uriBuilder.Path = "/api/v1/secrets/$SecretID"
+    $uri = $uriBuilder.Uri.ToString()
+    
+    $invokeResults = Invoke-RestMethod -Method Get -Uri $uri -Headers $ThycoticAuthenticationToken
+
+    $invokeResults
+}
+
+function Get-ThycoticSecretPermission {
+    [CmdletBinding(DefaultParameterSetName="Default")]
+    param (
+        [parameter(Mandatory, ParameterSetName="BySecretId",Position = 0)]
+        [Alias("q.filter.secretId")]
+        [int]
+        $SecretID,
+
+        [parameter(Mandatory, ParameterSetName="ByUserId",Position = 0)]
+        [Alias("q.filter.userId")]
+        [int]
+        $UserId,
+
+        [parameter(Mandatory, ParameterSetName="ByUserName",Position = 0)]
+        [Alias("q.filter.userName")]
+        [string]
+        $UserName,
+
+        [parameter(Mandatory, ParameterSetName="ByGroupId",Position = 0)]
+        [Alias("q.filter.groupId")]
+        [int]
+        $GroupId,
+
+        [parameter(Mandatory, ParameterSetName="ByGroupName",Position = 0)]
+        [Alias("q.filter.groupName")]
+        [string]
+        $GroupName,
+
+        [Alias("q.take")]
+        [int]
+        $MaxResults,
+        
+        [parameter(Mandatory)]
+        [ValidateScript({$null -ne $_.AbsoluteURI-and $_.Scheme -match "http|https"})]
+        [uri]
+        $ThycoticUrl,
+        
+        [parameter(Mandatory)]
+        [hashtable]
+        $ThycoticAuthenticationToken
+    )
+
+    $queryString = [Web.HttpUtility]::ParseQueryString('')
+
+    $MyInvocation.MyCommand.Parameters.GetEnumerator() | 
+        where {$_.Value.Aliases -like "q.*" -and $PSBoundParameters.Keys -contains $_.Key} |
+        foreach {
+            $queryString[$_.Value.Aliases[0].replace('q.','')] = $PSBoundParameters[$_.Key]
+        }
+
+    $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+    $uriBuilder.Path = '/api/v1/secret-permissions'
+    $uriBuilder.Query = $queryString.ToString()
+    $uri = $uriBuilder.Uri.ToString()
+
+    try {
+        $invokeResults = Invoke-RestMethod -Method Get -Uri $uri -Headers $ThycoticAuthenticationToken
+        
+        if ($invokeResults) {
+            if ($invokeResults.take -lt $invokeResults.total) {
+                $PSBoundParameters.MaxResults = $invokeResults.total
+                & $($PSCmdlet.MyInvocation.MyCommand.Name) @PSBoundParameters
+            }
+            else {
+                $invokeResults.records
+            }
+        }
+    }
+    catch {
+        throw $_
+    }
+}
+
+function Add-ThycoticSecretPermission {
+    [CmdletBinding(DefaultParameterSetName="Default")]
+    param (
+        [parameter(Mandatory)]
+        [int]
+        $SecretID,
+        
+        [parameter(Mandatory,ParameterSetName="User")]
+        [int]
+        $UserId,
+        
+        [parameter(Mandatory,ParameterSetName="Group")]
+        [int]
+        $GroupId,
+        
+        [parameter(Mandatory)]
+        [ValidateSet("Owner","Edit","View")]
+        [string]
+        $AccessLevel,
+        
+        [parameter(Mandatory)]
+        [ValidateScript({$null -ne $_.AbsoluteURI-and $_.Scheme -match "http|https"})]
+        [uri]
+        $ThycoticUrl,
+        
+        [parameter(Mandatory)]
+        [hashtable]
+        $ThycoticAuthenticationToken
+    )
+
+    $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+    $uriBuilder.Path = '/api/v1/secret-permissions/stub'
+    $uriBuilder.Query = "secretId=$SecretID"
+    $uri = $uriBuilder.Uri.ToString()
+    
+    $permissionStub = Invoke-RestMethod -Uri $uri -Method Get -Headers $ThycoticAuthenticationToken
+    
+    if ($UserId) {
+        $permissionStub.userId = $UserId
+    }
+        
+    if ($GroupId) {
+        $permissionStub.groupId = $GroupId
+        $permissionStub.userId = $null
+    }
+
+    $permissionStub.secretAccessRoleName = $AccessLevel
+    
+    $invokeBody = $permissionStub | ConvertTo-Json
+
+    $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+    $uriBuilder.Path = '/api/v1/secret-permissions/'
+    $uri = $uriBuilder.Uri.ToString()
+    
+    try {
+        Invoke-RestMethod -Uri $uri -Method Post -Body $invokeBody -Headers $ThycoticAuthenticationToken -ContentType "application/json"
+    }
+    catch {
+        throw $_
+    }
+}
+
+function Remove-ThycoticSecretPermission {
+    [CmdletBinding()]
+    param (
+        [parameter(Mandatory)]
+        [int]
+        $SecretPermissionID,
+
+        [parameter(Mandatory)]
+        [ValidateScript({$null -ne $_.AbsoluteURI-and $_.Scheme -match "http|https"})]
+        [uri]
+        $ThycoticUrl,
+        
+        [parameter(Mandatory)]
+        [hashtable]
+        $ThycoticAuthenticationToken
+    )
+
+    $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+    $uriBuilder.Path = "/api/v1/secret-permissions/$SecretPermissionID"
+    $uri = $uriBuilder.Uri.ToString()
+    
+    try {
+        Invoke-RestMethod -Uri $uri -Method Delete -Headers $ThycoticAuthToken
+    }
+    catch {
+        throw $_
+    }
+}
+
+function Get-ThycoticFolder {
+    [CmdletBinding(DefaultParameterSetName="Default")]
+    param (
+        [parameter(Mandatory, ParameterSetName="ByFolderID",Position = 0)]
+        [int]
+        $FolderID,
+
+        [parameter(Mandatory, ParameterSetName="ByFolderName",Position = 0)]
+        [Alias("q.filter.searchText")]
+        [string]
+        $FolderName,
+
+        [Alias("q.getAllChildren")]
+        [switch]
+        $GetSubFolders,
+
+        [Alias("q.take")]
+        [int]
+        $MaxResults,
+        
+        [parameter(Mandatory)]
+        [ValidateScript({$null -ne $_.AbsoluteURI-and $_.Scheme -match "http|https"})]
+        [uri]
+        $ThycoticUrl,
+        
+        [parameter(Mandatory)]
+        [hashtable]
+        $ThycoticAuthenticationToken
+    )
+
+    $queryString = [Web.HttpUtility]::ParseQueryString('')
+
+    $MyInvocation.MyCommand.Parameters.GetEnumerator() | 
+        where {$_.Value.Aliases -like "q.*" -and $PSBoundParameters.Keys -contains $_.Key} |
+        foreach {
+            $queryString[$_.Value.Aliases[0].replace('q.','')] = $PSBoundParameters[$_.Key]
+        }
+
+    $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+    $uriBuilder.Query = $queryString.ToString()
+
+    switch($PSCmdlet.ParameterSetName) {
+        "ByFolderName" {
+            $uriBuilder.Path = '/api/v1/folders'
+
+            try {
+                $invokeResults = Invoke-RestMethod -Method Get -Uri $uriBuilder.Uri.ToString() -Headers $ThycoticAuthenticationToken
+            }
+            catch {
+                throw $_
+            }
+            
+            if ($invokeResults) {
+                if ($invokeResults.take -lt $invokeResults.total) {
+                    $PSBoundParameters["MaxResults"] = $invokeResults.total
+                    & $($PSCmdlet.MyInvocation.MyCommand.Name) @PSBoundParameters
+                }
+
+                $PSBoundParameters.Remove('FolderName') | Out-Null
+                $PSBoundParameters.Remove('MaxResults') | Out-Null
+                
+                if ($GetSubFolders) {
+                    $PSBoundParameters["GetSubFolders"] = $true
+                }
+                
+                $invokeResults.records | foreach {
+                    $PSBoundParameters["FolderID"] = $_.id
+                    & $($PSCmdlet.MyInvocation.MyCommand.Name) @PSBoundParameters
+                }
+            }
+        }
+
+        "ByFolderID" {
+            $uriBuilder.Path = "/api/v1/folders/$FolderID"
+            
+            try {
+                Invoke-RestMethod -Method Get -Uri $uriBuilder.Uri.ToString() -Headers $ThycoticAuthenticationToken
+            }
+            catch {
+                throw $_
+            }
+        }
+    }
+}
+
+function Get-ThycoticSecretTemplate {
+    [CmdletBinding()]
+    param (
+        [Alias("q.filter.searchText")]
+        [string]
+        $TemplateName,
+
+        [Alias("q.filter.includeInactive")]
+        [Switch]
+        $IncludeInactiveTemplates,
+
+        [Alias("q.filter.includeSecretCount")]
+        [Switch]
+        $IncludeTemplateUsageCount,
+        
+        [Alias("q.take")]
+        [int]
+        $MaxResults,
+        
+        [parameter(Mandatory)]
+        [ValidateScript({$null -ne $_.AbsoluteURI-and $_.Scheme -match "http|https"})]
+        [uri]
+        $ThycoticUrl,
+        
+        [parameter(Mandatory)]
+        [hashtable]
+        $ThycoticAuthenticationToken
+    )
+
+    $queryString = [Web.HttpUtility]::ParseQueryString('')
+
+    $MyInvocation.MyCommand.Parameters.GetEnumerator() | 
+        where {$_.Value.Aliases -like "q.*" -and $PSBoundParameters.Keys -contains $_.Key} |
+        foreach {
+            $queryString[$_.Value.Aliases[0].replace('q.','')] = $PSBoundParameters[$_.Key]
+        }
+
+    $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+    $uriBuilder.Path = '/api/v1/secret-templates'
+    $uriBuilder.Query = $queryString.ToString()
+    $uri = $uriBuilder.Uri.ToString()
+
+    try {
+        $invokeResults = Invoke-RestMethod -Method Get -Uri $uri -Headers $ThycoticAuthenticationToken
+    }
+    catch {
+        throw $_
+    }
+
+    if ($invokeResults) {
+        if ($invokeResults.take -lt $invokeResults.total) {
+            $PSBoundParameters.MaxResults = $invokeResults.total
+            & $($PSCmdlet.MyInvocation.MyCommand.Name) @PSBoundParameters
+        }
+        else {
+            $invokeResults.records
+        }
+    }
+}
+
+function Get-ThycoticUser {
+    [CmdletBinding()]
+    param (
+        [Alias("q.filter.searchText")]
+        [string]
+        $User,
+
+        [Alias("q.filter.includeInactive")]
+        [Switch]
+        $IncludeInactiveUsers,
+        
+        [Alias("q.take")]
+        [int]
+        $MaxResults,
+        
+        [parameter(Mandatory)]
+        [ValidateScript({$null -ne $_.AbsoluteURI-and $_.Scheme -match "http|https"})]
+        [uri]
+        $ThycoticUrl,
+        
+        [parameter(Mandatory)]
+        [hashtable]
+        $ThycoticAuthenticationToken
+    )
+
+    $queryString = [Web.HttpUtility]::ParseQueryString('')
+
+    $MyInvocation.MyCommand.Parameters.GetEnumerator() | 
+        where {$_.Value.Aliases -like "q.*" -and $PSBoundParameters.Keys -contains $_.Key} |
+        foreach {
+            $queryString[$_.Value.Aliases[0].replace('q.','')] = $PSBoundParameters[$_.Key]
+        }
+
+    $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+    $uriBuilder.Path = '/api/v1/users'
+    $uriBuilder.Query = $queryString.ToString()
+    $uri = $uriBuilder.Uri.ToString()
+
+    try {
+        $invokeResults = Invoke-RestMethod -Method Get -Uri $uri -Headers $ThycoticAuthenticationToken
+    }
+    catch {
+        throw $_
+    }
+
+    if ($invokeResults) {
+        if ($invokeResults.take -lt $invokeResults.total) {
+            $PSBoundParameters.MaxResults = $invokeResults.total
+            & $($PSCmdlet.MyInvocation.MyCommand.Name) @PSBoundParameters
+        }
+        else {
+            $invokeResults.records
+        }
+    }
+}
+
+function Get-ThycoticGroup {
+    [CmdletBinding()]
+    param (
+        [Alias("q.filter.searchText")]
+        [string]
+        $GroupName,
+
+        [Alias("q.filter.includeInactive")]
+        [Switch]
+        $IncludeInactiveGroups,
+        
+        [Alias("q.filter.domainId")]
+        [Switch]
+        $DomainId,
+
+        [Alias("q.take")]
+        [int]
+        $MaxResults,
+        
+        [parameter(Mandatory)]
+        [ValidateScript({$null -ne $_.AbsoluteURI-and $_.Scheme -match "http|https"})]
+        [uri]
+        $ThycoticUrl,
+        
+        [parameter(Mandatory)]
+        [hashtable]
+        $ThycoticAuthenticationToken
+    )
+
+    $queryString = [Web.HttpUtility]::ParseQueryString('')
+
+    $MyInvocation.MyCommand.Parameters.GetEnumerator() | 
+        where {$_.Value.Aliases -like "q.*" -and $PSBoundParameters.Keys -contains $_.Key} |
+        foreach {
+            $queryString[$_.Value.Aliases[0].replace('q.','')] = $PSBoundParameters[$_.Key]
+        }
+
+    $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+    $uriBuilder.Path = '/api/v1/groups'
+    $uriBuilder.Query = $queryString.ToString()
+    $uri = $uriBuilder.Uri.ToString()
+
+    try {
+        $invokeResults = Invoke-RestMethod -Method Get -Uri $uri -Headers $ThycoticAuthenticationToken
+    }
+    catch {
+        throw $_
+    }
+    
+    if ($invokeResults) {
+        if ($invokeResults.take -lt $invokeResults.total) {
+            $PSBoundParameters.MaxResults = $invokeResults.total
+            & $($PSCmdlet.MyInvocation.MyCommand.Name) @PSBoundParameters
+        }
+        else {
+            $invokeResults.records
+        }
+    }
+}
+
+function New-ThycoticSecret {
+    [CmdletBinding()]
+    param (
+        [parameter(Mandatory)]
+        [Alias("arg.name")]
+        [string]
+        $SecretName,
+
+        [string]
+        $Domain,
+
+        [string]
+        $UserName,
+
+        [parameter(Mandatory)]
+        [string]
+        $AccountOwner,
+
+        [string]
+        $Password = [System.Web.Security.Membership]::GeneratePassword(16,5),
+
+        [Alias("arg.siteId")]
+        [int]
+        $SiteID,
+
+        [Alias("arg.autoChangeEnabled")]
+        [switch]
+        $AutoChangePassword,
+
+        [Alias("arg.checkOutEnabled")]
+        [switch]
+        $EnableCheckOut,
+
+        [Alias("arg.checkOutIntervalMinutes")]
+        [int]
+        $MinutesPerCheckoutSession,
+
+        [Alias("arg.checkOutChangePasswordEnabled")]
+        [switch]
+        $ChangePasswordOnCheckin,
+
+        [Alias("arg.enableInheritPermissions")]
+        [bool]
+        $InheritFolderPermissions,
+
+        [Alias("arg.enableInheritSecretPolicy")]
+        [bool]
+        $InheritFolderSecretPolicy,
+
+        [Alias("arg.secretPolicyId")]
+        [int]
+        $SecretPolicyId,
+
+        [parameter(Mandatory)]
+        [Alias("q.SecretTemplateId")]
+        [int]
+        $SecretTemplateId,
+        
+        [parameter(Mandatory)]
+        [Alias("q.FolderId")]
+        [int]
+        $FolderId,
+        
+        [parameter(Mandatory)]
+        [ValidateScript({$null -ne $_.AbsoluteURI-and $_.Scheme -match "http|https"})]
+        [uri]
+        $ThycoticUrl,
+        
+        [parameter(Mandatory)]
+        [hashtable]
+        $ThycoticAuthenticationToken
+    )
+
+    $queryString = [Web.HttpUtility]::ParseQueryString('')
+
+    $MyInvocation.MyCommand.Parameters.GetEnumerator() | 
+        where {$_.Value.Aliases -like "q.*" -and $PSBoundParameters.Keys -contains $_.Key} |
+        foreach {
+            $queryString[$_.Value.Aliases[0].replace('q.','')] = $PSBoundParameters[$_.Key]
+        }
+
+    $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+    $uriBuilder.Path = '/api/v1/secrets/stub'
+    $uriBuilder.Query = $queryString.ToString()
+    $uri = $uriBuilder.Uri.ToString()
+
+
+    try {
+        $secretsStub = Invoke-RestMethod -Uri $uri -Method Get -Headers $ThycoticAuthenticationToken
+    }
+    catch {
+        throw $_
+    }
+
+    #This will take any parameter that has an alias of  arg. and set the value in the stub
+    #If the parameter is not given a value then the default value from the stub is used.
+    $MyInvocation.MyCommand.Parameters.GetEnumerator() | 
+        where {$_.Value.Aliases -like "arg.*" -and $PSBoundParameters.Keys -contains $_.Key} |
+        foreach {
+            $secretsStub.($_.Value.Aliases[0].replace('arg.','')) = $PSBoundParameters[$_.Key]
+        }
+
+    $secretsStub.items | foreach {
+        if ($_.fieldName -eq "Domain") {
+            $_.itemValue = $Domain
+        }
+            
+        if ($_.fieldName -eq "Username") {
+            $_.itemValue = $UserName
+        }
+            
+        if ($_.fieldName -eq "Account Owner") {
+            $secretOwner = Get-ADUser -Filter {SamAccountName -eq $AccountOwner}
+            if ($null -ne $secretOwner) {
+                $secretOwnerString = "$($secretOwner.GivenName) $($secretOwner.Surname) ($($secretOwner.SamAccountName))"
+                $secretOwnerStringNormalized = (($secretOwnerString.Normalize([System.Text.NormalizationForm]::FormD)).ToCharArray() | 
+                    where {[Globalization.CharUnicodeInfo]::GetUnicodeCategory($_) -ne [Globalization.UnicodeCategory]::NonSpacingMark}) -join ""
+                $_.itemValue = $secretOwnerStringNormalized
+            }
+            else {
+                $_.itemValue = $AccountOwner
+            }
+        }
+
+        if ($_.fieldName -eq "Password") {
+            $_.itemValue = $Password
+        }
+    }
+
+    $invokeBody = $secretsStub | ConvertTo-Json -Depth 10
+
+    $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+    $uriBuilder.Path = '/api/v1/secrets'
+    $uri = $uriBuilder.Uri.ToString()
+
+    try {
+        Invoke-RestMethod -Uri $uri -Method Post -Body $invokeBody -Headers $ThycoticAuthenticationToken -ContentType "application/json"
+    }
+    catch {
+        throw $_
+    }
+}
+
+function CheckOut-ThycoticSecret {
+    [CmdletBinding()]
+    param (
+        [parameter(Mandatory)]
+        [int]
+        $SecretID,
+        
+        [parameter(Mandatory)]
+        [ValidateScript({$null -ne $_.AbsoluteURI-and $_.Scheme -match "http|https"})]
+        [uri]
+        $ThycoticUrl,
+        
+        [parameter(Mandatory)]
+        [hashtable]
+        $ThycoticAuthenticationToken
+    )
+
+    $uriBuilder = [System.UriBuilder]::new($ThycoticUrl)
+    $uriBuilder.Path = "/api/v1/secrets/$secretId/check-out"
+    $uri = $uriBuilder.Uri.ToString()
+
+    Invoke-RestMethod -Uri $uri -Method Post -Headers $ThycoticAuthenticationToken
+}
+
+function CheckIn-ThycoticSecret {
+    [CmdletBinding()]
+    param (
+        [parameter(Mandatory)]
+        [int]
+        $SecretID,
+
+        [bool]
+        $ForceCheckIn,
+        
+        [parameter(Mandatory)]
+        [ValidateScript({$null -ne $_.AbsoluteURI-and $_.Scheme -match "http|https"})]
+        [uri]
+        $ThycoticUrl,
+        
+        [parameter(Mandatory)]
+        [hashtable]
+        $ThycoticAuthenticationToken
+    )
+
+    $uriBuilder = [System.UriBuilder]::new($ThycoticUrl)
+    $uriBuilder.Path = "/api/v1/secrets/$SecretID/check-in"
+    $uri = $uriBuilder.Uri.ToString()
+
+    $invokeBody = @{
+        forceCheckIn = $ForceCheckIn
+    } | ConvertTo-Json
+
+    Invoke-RestMethod -Uri $uri -Body $invokeBody -Method Post -Headers $ThycoticAuthenticationToken -ContentType "application/json"
+}
+
+function Delete-ThycoticSecret {
+    [CmdletBinding()]
+    param (
+        [parameter(Mandatory)]
+        [int]
+        $SecretID,
+
+        [parameter(Mandatory)]
+        [ValidateScript({$null -ne $_.AbsoluteURI-and $_.Scheme -match "http|https"})]
+        [uri]
+        $ThycoticUrl,
+        
+        [parameter(Mandatory)]
+        [hashtable]
+        $ThycoticAuthenticationToken
+    )
+
+    $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+    $uriBuilder.Path = "/api/v1/secrets/$SecretID"
+    $uri = $uriBuilder.Uri.ToString()
+
+    Invoke-RestMethod -Uri $uri -Method Delete -Headers $ThycoticAuthenticationToken
+}
+
+function Expire-ThycoticAuthenitcationToken {
+    [CmdletBinding()]
+    param (
+        [parameter(Mandatory)]
+        [ValidateScript({$null -ne $_.AbsoluteURI-and $_.Scheme -match "http|https"})]
+        [uri]
+        $ThycoticUrl,
+        
+        [parameter(Mandatory)]
+        [hashtable]
+        $ThycoticAuthenticationToken
+    )
+
+    $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+    $uriBuilder.Path = "/api/v1/oauth-expiration"
+    $uri = $uriBuilder.Uri.ToString()
+
+    Invoke-RestMethod -uri $uri -Method Post -Headers $ThycoticAuthenticationToken
+}
+
+################
+#Verify Log path
+################
+
+$logFileDirectoryTest = Test-Path -Path $LogFileDirectory
+if ($logFileDirectoryTest -eq $false)
+{
+    New-Item -ItemType Directory -Path $logFileDirectory -Force
+}
+
+################
+# 1. Authenticate to Thycotic
+################
+
+$thycoticAuthenticationArgs = @{
+    ThycoticPassword =  $apiAccountPassword
+    ThycoticUrl = $ThycoticURL
+}
+
+#attempt to authetnitcate using $DomainName\$apiAccountUsername. if no domain is set then it will only try $apiAccountUsername
+$thycoticAuthenticationArgs["ThycoticUserName"] = [System.IO.Path]::Combine($DomainName,$apiAccountUsername)
+
+try {
+    $ThycoticAuthenticationTokenInfo = Get-ThycoticAuthenitcationToken @thycoticAuthenticationArgs
+}
+catch {
+    $thycoticAuthenticationArgs["ThycoticUserName"] = $apiAccountUsername
+
+    try {
+        $ThycoticAuthenticationTokenInfo = Get-ThycoticAuthenitcationToken @thycoticAuthenticationArgs
+    }
+    catch {
+        $message = "Was not able to loginto $($thycoticAuthenticationArgs['ThycoticUrl']) using $(if ($DomainName) {"either $([System.IO.Path]::Combine($DomainName,$apiAccountUsername)) or "})$apiAccountUsername. Please verify the username and password"
+        Write-Log -Message $message -Level Error -Throw
+    }
+}
+
+#Store the Thycotic Url and token info in a hashtable so we can use splating to pass the data to the api calls.
+#Reduces the number of times we need to copy/paste `-ThycoticUrl $ThycoticURL -ThycoticAuthenticationToken $ThycoticAuthenticationTokenInfo` on each api call.
+$thycoticApiCallInfo = @{
+    ThycoticUrl = $ThycoticURL
+    ThycoticAuthenticationToken = $ThycoticAuthenticationTokenInfo
+}
+
+################
+# 2. Get Admin Folder ID
+################
+
+#Get information about the userAdminFolder
+try {
+    $userAdminFolderInfo = Get-ThycoticFolder -FolderName $userAdminFolderName @thycoticApiCallInfo | where {$_.folderName -eq $userAdminFolderName}
+    
+    if (!$userAdminFolderInfo) {
+        $message = "Was not able to find the folder: $userAdminFolderName. Please verify the spelling of the folder and that $apiAccountUsername has access to the folder"
+        Write-Log -Message $message -Level Error -Throw
+    }
+    else {
+        # @($userAdminFolderInfo).Count is used to recast $userAdminFolderInfo to an object array to ensure proper count
+        if (@($userAdminFolderInfo).Count -gt 1) {
+            $message = "More than one folder was returned for $userAdminFolderName`:"
+            Write-Log -Message $message -Level Warn
+            $userAdminFolderInfo | foreach {
+                Write-Log -Message $_.folderPath -Level Warn
+            }
+
+            $message = "Searching for `"$userAdminFolderName`" returned $(@($userAdminFolderInfo).Count) results. Please make sure that the spelling of the folder name is correct for `$userAdminFolderName"
+            Write-Log -Message $message -Level Error -Throw
+        }
+    }
+}
+catch { 
+    $message = "There was an error getting the folder: $userAdminFolderName"
+    Write-Log -Message $message -Level Error
+    Write-Log -Message $_ -Level Error -Throw
+}
+
+################
+# 3. Get Template ID
+################
+
+#default
+try {
+    $secretTemplateInfo = Get-ThycoticSecretTemplate -TemplateName $secretTemplateName @thycoticApiCallInfo | where {$_.name -eq $secretTemplateName}
+    
+    if (!$secretTemplateInfo) {
+        $message = "Was not able to find the secret template: $secretTemplateName. Please verify the spelling of Secret Template"
+        Write-Log -Message $message -Level Error -Throw
+    }
+    else {
+        # @($secretTemplateInfo).Count is used to recast $secretTemplateInfo to an object array to ensure proper count
+        if (@($secretTemplateInfo).Count -gt 1) {
+            $message = "More than one secret template was returned for $secretTemplateName`:"
+            Write-Log -Message $message -Level Warn
+            $secretTemplateInfo | foreach {
+                $message = "$($_.Name) (ID=$($_.id))"
+                Write-Log -Message $message -Level Warn
+            }
+
+            $message = "Searching for `"$secretTemplateName`" returned $(@($secretTemplateInfo).Count) results. Please make sure that the spelling of the secret template name is correct for `$SecretTemplateName"
+            Write-Log -Message $message -Level Error -Throw
+        }
+    }
+}
+catch {
+    $message = "There was an error getting the template: $secretTemplateName"
+    Write-Log -Message $message -quite:$false -Level Error
+    Write-Log -Message $_ -Level Error -Throw
+}
+
+################
+# 4. Get thycoticAdmin group from Thycotic
+################
+
+#default
+try {
+    $thycoticAdminGroupInfo =  Get-ThycoticGroup -GroupName $adminGroupName @thycoticApiCallInfo | where {$_.name -eq $adminGroupName}
+
+    if (!$thycoticAdminGroupInfo) {
+        $message = "Was not able to find the group: $adminGroupName. Please verify the spelling of the group"
+        Write-Log -Message $message -Level Error -Throw
+    }
+    else {
+        # @($thycoticAdminGroupInfo).Count is used to recast $thycoticAdminGroupInfo to an object array to ensure proper count
+        if (@($thycoticAdminGroupInfo).Count -gt 1) {
+            $message = "More than one group was returned for $adminGroupName`:"
+            Write-Log -Message $message -Level Warn
+            $thycoticAdminGroupInfo | foreach {
+                $message = "$($_.Name) (ID=$($_.id))"
+                Write-Log -Message $message -Level Warn
+            }
+
+            $message = "Searching for `"$adminGroupName`" returned $(@($thycoticAdminGroupInfo).Count) results. Please make sure that the spelling of the group is correct for `$adminGroupName"
+            Write-Log -Message $message -Level Error -Throw
+        }
+    }
+
+}
+catch {
+    $message = "There was an error geting the group: $adminGroupName"
+    Write-Log -Message $message -quite:$false -Level Error
+    Write-Log -Message $_ -Level Error -Throw
+}
+
+
+################
+# 5. Get all Admin secrets from Thycotic
+################
+#Get list of Thycotic User Admin Secrets
+try {
+    $allThycoticAdminSecrets = Find-ThycoticSecret -FolderId $userAdminFolderInfo.id -IncludeRestrictedSecrets:$true -IncludeSubFolders:$true @thycoticApiCallInfo
+}
+catch {
+    $message = "Cannot get the $adminAccountSuffix Admin Secrets from Thycotic"
+    Write-Log -Message $message -Level Error
+    Write-Log -Message $_ -Level Error -Throw
+}
+
+if (@($allThycoticAdminSecrets).count -eq 0) {
+    $message = "No admin secrets returned from thycotic"
+    Write-Log -Message $message -Level Error -Throw
+}
+
+
+################
+# 6. Get all user accounts from Thycotic
+################
+#Get a list of all the Thycotic User Accounts
+try {
+    $thycoticUsers = Get-ThycoticUser @thycoticApiCallInfo | where {$_.domainId -ne -1 -and $_.userName -notlike "*sa" -and $_.userName -notlike "*-a"}
+}
+catch {
+    $message = "Cannot get users from thycotic"
+    Write-Log -Message $message -Level Error
+    Write-Log -Message $_ -Level Error -Throw
+}
+
+if (@($thycoticUsers).count -eq 0) {
+    $message = "No users returned from thycotic"
+    Write-Log -Message $message -Level Error -Throw
+}
+
+
+################
+# 7. Get all admin user accounts from AD
+################
+
+#Get list of Admin Accounts in AD
+try {
+    $adminAccounts_AD = Get-ADUser -Filter "samAccountName -like '*$adminAccountSuffix'" -ResultSetSize $null | where {$_.enabled -eq $true}
+}
+catch {
+    $message = "Was not able to pull a list of AD Admin Accounts"
+    Write-Log -Message $message -Level Error
+    Write-Log -Message $_ -Level Error -Throw
+}
+
+#Get list of User Accounts in AD
+try {
+    $userAccounts_AD = Get-ADUser -Filter "EmployeeNumber -like '*' " -Properties EmployeeNumber,employeeType,DisplayName | where {$_.employeeType -ne "thycoticAdmin" -and $_.enabled -eq $true}
+}
+catch {
+    $message = "Was not able to pull a list of AD User Accounts"
+    Write-Log -Message $message -Level Error
+    Write-Log -Message $_ -Level Error -Throw
+}
+
+################
+# 9. Add Admin Secrets to Thycotic
+################
+
+#default
+#This takes all the Thycotic users, and then returns only users who need admin accounts
+#$accountsToProcess = $thycoticUsers | where {"$($_.userName)$adminAccountSuffix" -notin ($allThycoticAdminSecrets.name -replace ".*\\","") -and "$($_.userName)$adminAccountSuffix" -in $adminAccounts_AD.samAccountName}
+
+#custom - Though this may become the defeault path since Admin accounts are I#'s and users are using first.last
+$accountsToProcess = $userAccounts_AD | where {"$($_.EmployeeNumber)$adminAccountSuffix" -notin ($allThycoticAdminSecrets.name -replace ".*\\","") -and $_.SamAccountName -in $thycoticUsers.userName}
+
+#All $userAccount variables are being customized
+foreach ($userAccount in $accountsToProcess) {
+    #creating a new session for each user to ensure we have a active token
+    $entryThycoticApiCallInfo = @{
+        ThycoticUrl = $ThycoticURL
+        ThycoticAuthenticationToken = Get-ThycoticAuthenitcationToken @thycoticAuthenticationArgs
+    }
+
+    $userAdminUserName = "$($userAccount.EmployeeNumber)$adminAccountSuffix"
+    $userAccount_Thycotic = $thycoticUsers | where {$_.userName -eq $userAccount.SamAccountName}
+
+    if ($true -eq $testRun) {
+        $message = "[$($userAccount.SamAccountName)] Test Run - Creating a Server Admin Secret for $userAdminUserName"
+        Write-Log -Message $message -TextColor Green
+    }
+    else {
+        ################
+        # Create Secret
+        ################ 
+                
+        $message = "[$($userAccount.SamAccountName)] Creating a Server Admin Secret for $userAdminUserName"                
+        Write-Log -Message $message 
+
+        $userAccountDisplayName = (($userAccount.displayName.Normalize([System.Text.NormalizationForm]::FormD)).ToCharArray() | 
+            where {[Globalization.CharUnicodeInfo]::GetUnicodeCategory($_) -ne [Globalization.UnicodeCategory]::NonSpacingMark}) -join ""
+
+        try {
+            #default
+            $secret = New-ThycoticSecret `
+                        -SecretName "$DomainName\$userAdminUserName" `
+                        -UserName $userAdminUserName `
+                        -Domain $DomainName `
+                        -InheritFolderPermissions:$false `
+                        -InheritFolderSecretPolicy:$true `
+                        -AccountOwner "$userAccountDisplayName - ($($userAccount.EmployeeNumber))" `
+                        -SecretTemplateId $SecretTemplateInfo.id `
+                        -FolderId $userAdminFolderInfo.id `
+                        @entryThycoticApiCallInfo
+
+            $message = "[$($userAccount.SamAccountName)] The secret $($secret.name) (ID $($secret.id)) was successfully created"
+            Write-Log -Message $message -TextColor Green
+        }
+
+        catch {
+            $message = "[$($userAccount.SamAccountName)] ----- Exception on creating the Secret -----"
+            Write-Log -Message $message -Level Error
+            Write-Log -Message "[$($userAccount.SamAccountName)] $_" -Level Error
+
+            Continue
+        }
+
+        if ($true -eq $secret.checkOutEnabled)
+        {
+            ################
+            # Check out the Secret
+            ################ 
+
+            Write-Log -Message "[$($userAccount.SamAccountName)] Checking out the secret: $($secret.name) (ID: $($secret.id))"
+
+            try
+            {
+                CheckOut-ThycoticSecret -SecretID $secret.id @entryThycoticApiCallInfo | Out-Null
+            }
+            catch
+            {
+                $message = "[$($userAccount.SamAccountName)] ----- Exception on checking out the Secret: $($secret.name) (ID: $($secret.id)) -----"
+                Write-Log -Message $message -Level Error
+                Write-Log -Message "[$($userAccount.SamAccountName)] $_" -Level Error -Throw
+            }
+        }
+
+        ################
+        # Set Permissions on the Secret
+        ################ 
+                
+        #Get existing permissions for secret
+        $permissions = Get-ThycoticSecretPermission -SecretID $secret.id @entryThycoticApiCallInfo
+        
+        $groupPermissions = $permissions | where {$_.groupID}
+        $userPermissions = $permissions | where {$_.userID}
+
+        try {
+            if ($thycoticAdminGroupInfo.id -notin $groupPermissions.groupId -or !($groupPermissions)) {
+                # Add permissions for ThycoticAdmins Group to the secret
+                $message = "[$($userAccount.SamAccountName)] Granting Owner permissions for the group $($thycoticAdminGroupInfo.name) to $($secret.name) (ID: $($secret.id))"
+                Write-Log -Message $message
+
+                Add-ThycoticSecretPermission -SecretID $secret.id -GroupId $thycoticAdminGroupInfo.id -AccessLevel Owner @entryThycoticApiCallInfo | Out-Null
+            }
+
+            if ($userAccount_Thycotic.id -notin $userPermissions.userId -or !($userPermissions)) {
+                # Add permissions for user to the secret
+                $message = "[$($userAccount.SamAccountName)] Granting Edit permissions for the user $($userAccount_Thycotic.displayName) to $($secret.name) (ID: $($secret.id))"
+                Write-Log -Message $message
+
+                Add-ThycoticSecretPermission -SecretID $secret.id -UserId $userAccount_Thycotic.id -AccessLevel Edit @entryThycoticApiCallInfo | Out-Null
+            }
+        }
+        catch {
+            $message = "[$($userAccount.SamAccountName)] ----- Error adding Permissions to the Secret: $($secret.name) (ID: $($secret.id)) -----"
+            Write-Log -Message $message -Level Error
+            Write-Log -Message "[$($userAccount.SamAccountName)] $_" -Level Error -Throw
+        }
+
+        try {
+            $groupPermissions | where {$_.groupId -ne $thycoticAdminGroupInfo.id} | foreach {
+                $message = "[$($userAccount.SamAccountName)] Removing $($_.secretAccessRoleName) permissions for the group $($_.knownAs) from the secret: $($secret.name) (ID: $($secret.id))"
+                Write-Log -Message $message
+
+                #Remove-ThycoticSecretPermission -SecretPermissionID $_.id @entryThycoticApiCallInfo | Out-Null
+            }
+
+            $userPermissions | where {$_.userId -ne $userAccount_Thycotic.id} | foreach {
+                $message = "[$($userAccount.SamAccountName)] Removing permissions $($_.secretAccessRoleName) for the user $($_.knownAs) from the secret: $($secret.name) (ID: $($secret.id))"
+                Write-Log -Message $message
+
+                #Remove-ThycoticSecretPermission -SecretPermissionID $_.id @entryThycoticApiCallInfo | Out-Null
+            }
+        }
+        catch {
+            $message = "[$($userAccount.SamAccountName)] ----- Error removing Permissions from the Secret: $($secret.name) (ID: $($secret.id)) -----"
+            Write-Log -Message $message -Level Error
+            Write-Log -Message "[$($userAccount.SamAccountName)] $_" -Level Error -Throw
+        }
+
+        if ($secret.checkOutEnabled -eq $true) {
+            ################
+            # Check the Secret in
+            ################ 
+
+            # Beacuse the policy applied forces you to check out the account to modify it
+            # and then it changes the password on check in, we are going to ignore the
+            # POST /secrets/{id}/change-password method to change the password and instead
+            # just the account out and back in
+
+            $message = "[$($userAccount.SamAccountName)] Checking the secret $($secret.name) (ID: $($secret.id)) back in"
+            Write-Log -Message $message
+                        
+            try {
+                CheckIn-ThycoticSecret -SecretID $secret.id  -ForceCheckIn:$false @entryThycoticApiCallInfo | Out-Null
+            }
+            catch {
+                try {
+                    CheckIn-ThycoticSecret -SecretID $secret.id -ForceCheckIn:$true @entryThycoticApiCallInfo | Out-Null
+                }
+                catch {
+                    $message = "[$($userAccount.SamAccountName)] ----- Exception on checking in $($secret.name) (ID: $($secret.id)) -----"
+                    Write-Log -Message $message -Level Error
+                
+                    $message = "[$($userAccount.SamAccountName)] ----- THE ACCOUNT IS STILL CHECKED OUT. PLEASE MAKE SURE TO CHECK IT IN -----"
+                    Write-Log -Message $message -Level Error
+                
+                    Write-Log -Message "[$($userAccount.SamAccountName)] $_" -Level Error -Throw
+                }
+            }
+        }
+    }
+        
+    Write-Log -Message "[$($userAccount.SamAccountName)] ========================================================="
+
+    ################
+    # Expire current Token
+    ################
+
+    Expire-ThycoticAuthenitcationToken @entryThycoticApiCallInfo | Out-Null
+}
+
+################
+# 10. Remove Admin Secrets
+################
+
+$secretsToDelete = $allThycoticAdminSecrets | where {$_.name -replace "$DomainName\\","" -notin $adminAccounts_AD.SamAccountName}
+
+foreach ($secret in $secretsToDelete) {
+    if ($true -eq $testRun) {
+        $message = "[$($secret.name)] ---- TEST RUN ---- The secret $($secret.name) (ID=$($secret.id)) would be deleted"
+        Write-Log -Message $message -Level Warn
+    }
+    else {
+        $entryThycoticApiCallInfo = @{
+            ThycoticUrl = $ThycoticURL
+            ThycoticAuthenticationToken = Get-ThycoticAuthenitcationToken @thycoticAuthenticationArgs
+        }
+
+        $message = "[$($secret.name)] Deleting the secret $($secret.name) (ID=$($secret.id))"
+        Write-Log -Message $message -Level Warn
+
+        try {
+            Delete-ThycoticSecret -SecretID $secret.id @entryThycoticApiCallInfo | Out-Null
+        }
+        catch {
+            $message = "[$($secret.name)] ----- Was not able to delte $($secret.name) (ID=$($secret.id)) -----"
+            Write-Log -Message $message -Level Error
+            Write-Log -Message "[$($userAccount.SamAccountName)] $_" -Level Error -ThrowWrite-Log -Message "[$($userAccount.SamAccountName)] $_" -Level Error
+        }
+
+        Expire-ThycoticAuthenitcationToken @entryThycoticApiCallInfo | Out-Null
+    }
+}
