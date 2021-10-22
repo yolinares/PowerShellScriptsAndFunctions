@@ -1,0 +1,105 @@
+function New-ThycoticDependency {
+    #Currently only fully supports adding powershell dependencies
+    [CmdletBinding()]
+    param (
+        [parameter(Mandatory)]
+        [string]
+        $Name,
+
+        [parameter(Mandatory)]
+        [Alias("q.secretId")]
+        [int]
+        $SecretID,
+
+        [parameter(Mandatory)]
+        [Alias("q.scriptId")]
+        [int]
+        $ScriptID,
+
+        [parameter(Mandatory)]
+        [Alias("arg.groupId")]
+        [int]
+        $DependencyGroupID,
+
+        [parameter(Mandatory)]
+        [Alias("q.typeId")]
+        [ValidateSet("PowerShell","SSH","SQL")]
+        [string]
+        $ScriptType,
+
+        [Alias("arg.machineName")]
+        [string]
+        $RunScriptOn,
+        
+        [Alias("arg.privilegedAccountSecretId")]
+        [int]
+        $PrivilegedAccountSecretId,
+
+        [array]
+        $ScriptArguments,
+
+        [parameter(Mandatory)]
+        [ValidateScript({$null -ne $_.AbsoluteURI-and $_.Scheme -match "http|https"})]
+        [uri]
+        $ThycoticUrl,
+        
+        [parameter(Mandatory)]
+        [hashtable]
+        $ThycoticAuthenticationToken
+    )
+
+    switch ($ScriptType) {
+        "PowerShell" {$PSBoundParameters["ScriptType"] = 7}
+        "SSH"        {$PSBoundParameters["ScriptType"] = 8}
+        "SQL"        {$PSBoundParameters["ScriptType"] = 9}
+    }
+
+    $queryString = [Web.HttpUtility]::ParseQueryString('')
+
+    $MyInvocation.MyCommand.Parameters.Values | 
+        where {$_.Aliases -like "q.*" -and $PSBoundParameters.Keys -contains $_.Name} |
+        foreach {
+            $queryString[$_.Aliases[0].replace('q.','')] = $PSBoundParameters[$_.Name]
+        }
+
+    $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+    $uriBuilder.Path = '/api/v1/secret-dependencies/stub'
+    $uriBuilder.Query = $queryString.ToString()
+    $uri = $uriBuilder.Uri.ToString()
+    
+    try {
+        $dependencyStub = Invoke-RestMethod -Uri $uri -Method Get -Headers $ThycoticAuthenticationToken
+    }
+    catch {
+        throw $_
+    }
+
+    #This will take any parameter that has an alias of  arg. and set the value in the stub
+    #If the parameter is not given a value then the default value from the stub is used.
+
+    $MyInvocation.MyCommand.Parameters.Values | 
+        where {$_.Aliases -like "arg.*" -and $PSBoundParameters.Keys -contains $_.Name} |
+        foreach {
+            $dependencyStub.("$($_.Aliases[0].replace('arg.',''))") = $PSBoundParameters[$_.Name]
+        }
+
+    if ($Name -and ($dependencyStub.runScript | Get-Member).Name -contains "serviceName") {
+        $dependencyStub.runScript.serviceName = $Name 
+    }
+
+    if ($ScriptArguments) {
+        $dependencyStub.runScript.scriptArguments = New-Object System.Collections.ArrayList
+        $ScriptArguments -split "," | 
+        foreach {
+            $dependencyStub.runScript.scriptArguments.Add($(New-Object psobject -Property $([ordered]@{name="";value="$_";type=""}))) | Out-Null
+        }
+    }
+
+    $body = $dependencyStub | ConvertTo-Json -Depth 10
+
+    $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+    $uriBuilder.Path = '/api/v1/secret-dependencies'
+    $uri = $uriBuilder.Uri.ToString()
+
+    Invoke-RestMethod -Uri $uri -Body $body -Method Post -Headers $ThycoticAuthenticationToken -ContentType "application/json"
+}

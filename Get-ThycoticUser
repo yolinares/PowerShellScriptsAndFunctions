@@ -1,0 +1,55 @@
+function Get-ThycoticUser {
+    [CmdletBinding()]
+    param (
+        [Alias("q.filter.searchText")]
+        [string]
+        $User,
+
+        [Alias("q.filter.includeInactive")]
+        [Switch]
+        $IncludeInactiveUsers,
+        
+        [Alias("q.take")]
+        [int]
+        $MaxResults,
+        
+        [parameter(Mandatory)]
+        [ValidateScript({$null -ne $_.AbsoluteURI-and $_.Scheme -match "http|https"})]
+        [uri]
+        $ThycoticUrl,
+        
+        [parameter(Mandatory)]
+        [hashtable]
+        $ThycoticAuthenticationToken
+    )
+
+    $queryString = [Web.HttpUtility]::ParseQueryString('')
+
+    $MyInvocation.MyCommand.Parameters.GetEnumerator() | 
+        where {$_.Value.Aliases -like "q.*" -and $PSBoundParameters.Keys -contains $_.Key} |
+        foreach {
+            $queryString[$_.Value.Aliases[0].replace('q.','')] = $PSBoundParameters[$_.Key]
+        }
+
+    $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+    $uriBuilder.Path = '/api/v1/users'
+    $uriBuilder.Query = $queryString.ToString()
+    $uri = $uriBuilder.Uri.ToString()
+
+    try {
+        $invokeResults = Invoke-RestMethod -Method Get -Uri $uri -Headers $ThycoticAuthenticationToken
+    }
+    catch {
+        throw $_
+    }
+
+    if ($invokeResults) {
+        if ($invokeResults.take -lt $invokeResults.total) {
+            $PSBoundParameters.MaxResults = $invokeResults.total
+            & $($PSCmdlet.MyInvocation.MyCommand.Name) @PSBoundParameters
+        }
+        else {
+            $invokeResults.records
+        }
+    }
+}

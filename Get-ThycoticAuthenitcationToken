@@ -1,0 +1,44 @@
+function Get-ThycoticAuthenitcationToken {
+    param(
+        [parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $ThycoticUserName,
+
+        [parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [String]
+        $ThycoticPassword,
+
+        [parameter(Mandatory)]
+        [ValidateScript({$null -ne $_.AbsoluteURI-and $_.Scheme -match "http|https"})]
+        [uri]
+        $ThycoticUrl
+    )
+
+    #force TLS1.2
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+    #Stores the creds to authenticate to Thycotic
+    $invokeBody = @{
+        username = $ThycoticUserName
+        password = $ThycoticPassword
+        grant_type = "password"
+    }
+
+    $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+    $uriBuilder.Path = '/oauth2/token'
+    $uri = $uriBuilder.Uri.ToString()
+
+    try {
+        #Connects to the thycotic server and retrive the token
+        $invokeResponse = Invoke-RestMethod -Uri $uri -Method Post -Body $invokeBody
+    }
+    catch {
+        throw $_
+    }
+    
+    $headerInfo = @{"Authorization" = "Bearer $($invokeResponse.access_token)"}
+
+    $headerInfo
+}

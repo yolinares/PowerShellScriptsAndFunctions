@@ -1,0 +1,38 @@
+function Set-ThycoticGroupMembership {
+    [CmdletBinding()]
+    param (
+        [parameter(Mandatory)]
+        [int]
+        $GroupID,
+        
+        [array]
+        $GroupMembers,
+
+        [parameter(Mandatory)]
+        [ValidateScript({$null -ne $_.AbsoluteURI-and $_.Scheme -match "http|https"})]
+        [uri]
+        $ThycoticUrl,
+        
+        [parameter(Mandatory)]
+        [hashtable]
+        $ThycoticAuthenticationToken
+    )
+
+    Process {
+        $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+        $uriBuilder.Path = "/api/v1/groups/$GroupID/users"
+        $uri = $uriBuilder.Uri.ToString()
+        
+        [array]$groupMembersFiltered = $GroupMembers | foreach {
+            if ($_ -match "^\d+$") {
+                $_
+            }
+        }
+
+        $body = @{
+            userIds = $groupMembersFiltered
+        } | ConvertTo-Json
+
+        Invoke-RestMethod -Method Put -Body $body -Uri $uri -Headers $ThycoticAuthenticationToken -ContentType "application/json"
+    }
+}

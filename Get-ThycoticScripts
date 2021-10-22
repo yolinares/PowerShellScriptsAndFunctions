@@ -1,0 +1,55 @@
+function Get-ThycoticScripts {
+    [CmdletBinding()]
+    param (
+        [Alias("q.filter.searchText")]
+        [string]
+        $ScriptName,
+
+        [Alias("q.filter.includeInactive")]
+        [switch]
+        $IncludeDisabledScripts,
+
+        [Alias("q.take")]
+        [int]
+        $MaxResults,
+        
+        [parameter(Mandatory)]
+        [ValidateScript({$null -ne $_.AbsoluteURI-and $_.Scheme -match "http|https"})]
+        [uri]
+        $ThycoticUrl,
+        
+        [parameter(Mandatory)]
+        [hashtable]
+        $ThycoticAuthenticationToken
+    )
+
+    $queryString = [Web.HttpUtility]::ParseQueryString('')
+
+    $MyInvocation.MyCommand.Parameters.Values | 
+        where {$_.Aliases -like "q.*" -and $PSBoundParameters.Keys -contains $_.Name} |
+        foreach {
+            $queryString[$_.Aliases[0].replace('q.','')] = $PSBoundParameters[$_.Name]
+        }
+
+    $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+    $uriBuilder.Path = '/api/v1/userscripts'
+    $uriBuilder.Query = $queryString.ToString()
+    $uri = $uriBuilder.Uri.ToString()
+
+    try {
+        $invokeResults = Invoke-RestMethod -Method Get -Uri $uri -Headers $ThycoticAuthenticationToken
+    }
+    catch {
+        $_
+    }
+
+    if ($invokeResults) {
+        if ($invokeResults.take -lt $invokeResults.total) {
+            $PSBoundParameters.MaxResults = $invokeResults.total
+            & $($PSCmdlet.MyInvocation.MyCommand.Name) @PSBoundParameters
+        }
+        else {
+            $invokeResults.records
+        }
+    }
+}

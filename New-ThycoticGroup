@@ -1,0 +1,27 @@
+function New-ThycoticGroup {
+    [CmdletBinding()]
+    param (
+        [string]
+        $GroupName,
+        
+        [parameter(Mandatory)]
+        [ValidateScript({$null -ne $_.AbsoluteURI-and $_.Scheme -match "http|https"})]
+        [uri]
+        $ThycoticUrl,
+        
+        [parameter(Mandatory)]
+        [hashtable]
+        $ThycoticAuthenticationToken
+    )
+
+    $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+    $uriBuilder.Path = '/api/v1/groups'
+    $uri = $uriBuilder.Uri.ToString()
+
+    $body = @{
+        Name = $GroupName
+        Enabled = $true
+    } | ConvertTo-Json
+
+    Invoke-RestMethod -Method Post -Body $body -Uri $uri -Headers $ThycoticAuthenticationToken -ContentType "application/json"
+}

@@ -1,0 +1,42 @@
+function New-ThycoticDependencyGroup {
+    [CmdletBinding()]
+    param (
+        [parameter(Mandatory)]
+        [int]
+        $SecretID,
+
+        [parameter(Mandatory)]
+        [Alias("arg.secretDependencyGroupName")]
+        [string]
+        $DependencyGroupName,
+
+        [Alias("arg.siteId")]
+        [int]
+        $SiteID,
+
+        #[parameter(Mandatory)]
+        [ValidateScript({$null -ne $_.AbsoluteURI-and $_.Scheme -match "http|https"})]
+        [uri]
+        $ThycoticUrl,
+        
+        #[parameter(Mandatory)]
+        [hashtable]
+        $ThycoticAuthenticationToken
+    )
+
+    $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+    $uriBuilder.Path = "/api/v1/secret-dependencies/groups/$SecretID"
+    $uri = $uriBuilder.Uri.ToString()
+    
+    $bodydata = @{}
+
+    $MyInvocation.MyCommand.Parameters.Values | 
+        where {$_.Aliases -like "arg.*" -and $PSBoundParameters.Keys -contains $_.Name} | 
+        foreach {
+            $bodydata[$_.Aliases[0].replace('arg.','')] = $PSBoundParameters[$_.Name]
+        }
+    
+    $body = $bodydata | ConvertTo-Json
+
+    Invoke-RestMethod -Uri $uri -Body $Body -Method Post -Headers $ThycoticAuthenticationToken -ContentType "application/json"
+}

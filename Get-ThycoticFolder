@@ -1,0 +1,79 @@
+function Get-ThycoticFolder {
+    [CmdletBinding(DefaultParameterSetName="Default")]
+    param (
+        [parameter(Mandatory, ParameterSetName="ByFolderID",Position = 0)]
+        [int]
+        $FolderID,
+
+        [parameter(Mandatory, ParameterSetName="ByFolderName",Position = 0)]
+        [Alias("q.filter.searchText")]
+        [string]
+        $FolderName,
+
+        [Alias("q.getAllChildren")]
+        [switch]
+        $GetSubFolders,
+
+        [Alias("q.take")]
+        [int]
+        $MaxResults,
+        
+        [parameter(Mandatory)]
+        [ValidateScript({$null -ne $_.AbsoluteURI-and $_.Scheme -match "http|https"})]
+        [uri]
+        $ThycoticUrl,
+        
+        [parameter(Mandatory)]
+        [hashtable]
+        $ThycoticAuthenticationToken
+    )
+
+    $queryString = [Web.HttpUtility]::ParseQueryString('')
+
+    $MyInvocation.MyCommand.Parameters.GetEnumerator() | 
+        where {$_.Value.Aliases -like "q.*" -and $PSBoundParameters.Keys -contains $_.Key} |
+        foreach {
+            $queryString[$_.Value.Aliases[0].replace('q.','')] = $PSBoundParameters[$_.Key]
+        }
+
+    $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+    $uriBuilder.Query = $queryString.ToString()
+
+    switch($PSCmdlet.ParameterSetName) {
+        "ByFolderName" {
+            $uriBuilder.Path = '/api/v1/folders'
+
+            try {
+                $invokeResults = Invoke-RestMethod -Method Get -Uri $uriBuilder.Uri.ToString() -Headers $ThycoticAuthenticationToken
+            }
+            catch {
+                throw $_
+            }
+            
+            if ($invokeResults) {
+                if ($invokeResults.take -lt $invokeResults.total) {
+                    $PSBoundParameters["MaxResults"] = $invokeResults.total
+                    & $($PSCmdlet.MyInvocation.MyCommand.Name) @PSBoundParameters
+                }
+
+                $PSBoundParameters.Remove('FolderName') | Out-Null
+                $PSBoundParameters.Remove('MaxResults') | Out-Null
+                
+                if ($GetSubFolders) {
+                    $PSBoundParameters["GetSubFolders"] = $true
+                }
+                
+                $invokeResults.records | foreach {
+                    $PSBoundParameters["FolderID"] = $_.id
+                    & $($PSCmdlet.MyInvocation.MyCommand.Name) @PSBoundParameters
+                }
+            }
+        }
+
+        "ByFolderID" {
+            $uriBuilder.Path = "/api/v1/folders/$FolderID"
+            
+            Invoke-RestMethod -Method Get -Uri $uriBuilder.Uri.ToString() -Headers $ThycoticAuthenticationToken
+        }
+    }
+}

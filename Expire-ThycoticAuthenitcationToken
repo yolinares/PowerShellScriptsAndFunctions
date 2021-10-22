@@ -1,0 +1,19 @@
+function Expire-ThycoticAuthenitcationToken {
+    [CmdletBinding()]
+    param (
+        [parameter(Mandatory)]
+        [ValidateScript({$null -ne $_.AbsoluteURI-and $_.Scheme -match "http|https"})]
+        [uri]
+        $ThycoticUrl,
+        
+        [parameter(Mandatory)]
+        [hashtable]
+        $ThycoticAuthenticationToken
+    )
+
+    $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+    $uriBuilder.Path = "/api/v1/oauth-expiration"
+    $uri = $uriBuilder.Uri.ToString()
+
+    Invoke-RestMethod -uri $uri -Method Post -Headers $ThycoticAuthenticationToken
+}

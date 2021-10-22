@@ -1,0 +1,25 @@
+function Run-ThycoticDependency {
+    [CmdletBinding()]
+    param (
+        [parameter(Mandatory)]
+        [int]
+        $DependecyID,
+
+        #[parameter(Mandatory)]
+        [ValidateScript({$null -ne $_.AbsoluteURI-and $_.Scheme -match "http|https"})]
+        [uri]
+        $ThycoticUrl,
+        
+        #[parameter(Mandatory)]
+        [hashtable]
+        $ThycoticAuthenticationToken
+    )
+
+    $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+    $uriBuilder.Path = '/api/v1/secret-dependencies/run'
+    $uri = $uriBuilder.Uri.ToString()
+
+    $body = "[$($DependecyID)]"
+    
+    Invoke-RestMethod -Uri $uri -Body $body -Method Post -Headers $ThycoticAuthenticationToken -ContentType "application/json"
+}

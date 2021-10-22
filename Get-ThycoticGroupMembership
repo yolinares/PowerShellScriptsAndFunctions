@@ -1,0 +1,25 @@
+function Get-ThycoticGroupMembership {
+    [CmdletBinding()]
+    param (
+        [parameter(Mandatory)]
+        [int]
+        $GroupID,
+
+        [parameter(Mandatory)]
+        [ValidateScript({$null -ne $_.AbsoluteURI-and $_.Scheme -match "http|https"})]
+        [uri]
+        $ThycoticUrl,
+        
+        [parameter(Mandatory)]
+        [hashtable]
+        $ThycoticAuthenticationToken
+    )
+
+    Process {
+        $uriBuilder = [System.UriBuilder]::new($ThycoticUrl.ToString().TrimEnd("/"))
+        $uriBuilder.Path = "/api/v1/groups/$GroupID/users"
+        $uri = $uriBuilder.Uri.ToString()
+
+        Invoke-RestMethod -Method Get -Uri $uri -Headers $ThycoticAuthenticationToken -ContentType "application/json"
+    }
+}
